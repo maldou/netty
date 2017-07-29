@@ -15,6 +15,9 @@
  */
 package io.netty.buffer;
 
+import io.netty.util.internal.PlatformDependent;
+import org.junit.Assume;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.nio.ByteBuffer;
@@ -25,10 +28,14 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 
 public class UnsafeByteBufUtilTest {
+    @Before
+    public void checkHasUnsafe() {
+        Assume.assumeTrue("sun.misc.Unsafe not found, skip tests", PlatformDependent.hasUnsafe());
+    }
 
     @Test
     public void testSetBytesOnReadOnlyByteBuffer() throws Exception {
-        byte[] testData = new byte[]{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+        byte[] testData = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
         int length = testData.length;
 
         ByteBuffer readOnlyBuffer = ByteBuffer.wrap(testData).asReadOnlyBuffer();
@@ -50,7 +57,7 @@ public class UnsafeByteBufUtilTest {
 
     @Test
     public void testSetBytesOnReadOnlyByteBufferWithPooledAlloc() throws Exception {
-        byte[] testData = new byte[]{0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+        byte[] testData = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
         int length = testData.length;
 
         ByteBuffer readOnlyBuffer = ByteBuffer.wrap(testData).asReadOnlyBuffer();
@@ -66,8 +73,8 @@ public class UnsafeByteBufUtilTest {
 
         try {
             // just check that two following buffers share same array but different offset
-            assertEquals(b1.array().length, pageSize);
-            assertEquals(b1.array(), b2.array());
+            assertEquals(pageSize, b1.array().length);
+            assertArrayEquals(b1.array(), b2.array());
             assertNotEquals(b1.arrayOffset(), b2.arrayOffset());
 
             UnsafeByteBufUtil.setBytes(targetBuffer, directBufferAddress(targetBuffer.nioBuffer()), 0, readOnlyBuffer);

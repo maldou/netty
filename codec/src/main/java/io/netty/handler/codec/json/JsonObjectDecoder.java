@@ -45,6 +45,8 @@ public class JsonObjectDecoder extends ByteToMessageDecoder {
     private int openBraces;
     private int idx;
 
+    private int lastReaderIndex;
+
     private int state;
     private boolean insideString;
 
@@ -86,6 +88,10 @@ public class JsonObjectDecoder extends ByteToMessageDecoder {
         if (state == ST_CORRUPTED) {
             in.skipBytes(in.readableBytes());
             return;
+        }
+
+        if (this.idx > in.readerIndex() && lastReaderIndex != in.readerIndex()) {
+            this.idx = in.readerIndex();
         }
 
         // index of next byte to process.
@@ -170,6 +176,7 @@ public class JsonObjectDecoder extends ByteToMessageDecoder {
         } else {
             this.idx = idx;
         }
+        this.lastReaderIndex = in.readerIndex();
     }
 
     /**

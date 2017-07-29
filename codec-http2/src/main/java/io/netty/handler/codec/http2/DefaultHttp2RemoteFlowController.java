@@ -25,6 +25,8 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_WINDOW_SIZE;
+import static io.netty.handler.codec.http2.Http2CodecUtil.MAX_WEIGHT;
+import static io.netty.handler.codec.http2.Http2CodecUtil.MIN_WEIGHT;
 import static io.netty.handler.codec.http2.Http2Error.FLOW_CONTROL_ERROR;
 import static io.netty.handler.codec.http2.Http2Error.INTERNAL_ERROR;
 import static io.netty.handler.codec.http2.Http2Exception.streamError;
@@ -176,6 +178,16 @@ public class DefaultHttp2RemoteFlowController implements Http2RemoteFlowControll
         monitor.channelWritabilityChange();
     }
 
+    @Override
+    public void updateDependencyTree(int childStreamId, int parentStreamId, short weight, boolean exclusive) {
+        // It is assumed there are all validated at a higher level. For example in the Http2FrameReader.
+        assert weight >= MIN_WEIGHT && weight <= MAX_WEIGHT : "Invalid weight";
+        assert childStreamId != parentStreamId : "A stream cannot depend on itself";
+        assert childStreamId > 0 && parentStreamId >= 0 : "childStreamId must be > 0. parentStreamId must be >= 0.";
+
+        streamByteDistributor.updateDependencyTree(childStreamId, parentStreamId, weight, exclusive);
+    }
+
     private boolean isChannelWritable() {
         return ctx != null && isChannelWritable0();
     }
@@ -234,12 +246,12 @@ public class DefaultHttp2RemoteFlowController implements Http2RemoteFlowControll
     }
 
     private int maxUsableChannelBytes() {
-        // If the channel isWritable, allow at least minUseableChannelBytes.
+        // If the channel isWritable, allow at least minUsableChannelBytes.
         int channelWritableBytes = (int) min(Integer.MAX_VALUE, ctx.channel().bytesBeforeUnwritable());
-        int useableBytes = channelWritableBytes > 0 ? max(channelWritableBytes, minUsableChannelBytes()) : 0;
+        int usableBytes = channelWritableBytes > 0 ? max(channelWritableBytes, minUsableChannelBytes()) : 0;
 
         // Clip the usable bytes by the connection window.
-        return min(connectionState.windowSize(), useableBytes);
+        return min(connectionState.windowSize(), usableBytes);
     }
 
     /**

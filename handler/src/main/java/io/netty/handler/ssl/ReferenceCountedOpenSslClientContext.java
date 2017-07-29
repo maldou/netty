@@ -17,9 +17,9 @@ package io.netty.handler.ssl;
 
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
-import org.apache.tomcat.jni.CertificateRequestedCallback;
-import org.apache.tomcat.jni.SSL;
-import org.apache.tomcat.jni.SSLContext;
+import io.netty.internal.tcnative.CertificateRequestedCallback;
+import io.netty.internal.tcnative.SSL;
+import io.netty.internal.tcnative.SSLContext;
 
 import java.security.KeyStore;
 import java.security.PrivateKey;
@@ -54,10 +54,10 @@ public final class ReferenceCountedOpenSslClientContext extends ReferenceCounted
                                          X509Certificate[] keyCertChain, PrivateKey key, String keyPassword,
                                          KeyManagerFactory keyManagerFactory, Iterable<String> ciphers,
                                          CipherSuiteFilter cipherFilter, ApplicationProtocolConfig apn,
-                                         long sessionCacheSize, long sessionTimeout)
-            throws SSLException {
+                                         String[] protocols, long sessionCacheSize, long sessionTimeout,
+                                         boolean enableOcsp) throws SSLException {
         super(ciphers, cipherFilter, apn, sessionCacheSize, sessionTimeout, SSL.SSL_MODE_CLIENT, keyCertChain,
-              ClientAuth.NONE, false, true);
+              ClientAuth.NONE, protocols, false, enableOcsp, true);
         boolean success = false;
         try {
             sessionContext = newSessionContext(this, ctx, engineMap, trustCertCollection, trustManagerFactory,
@@ -90,65 +90,63 @@ public final class ReferenceCountedOpenSslClientContext extends ReferenceCounted
             throw new IllegalArgumentException(
                     "Either both keyCertChain and key needs to be null or none of them");
         }
-        synchronized (ReferenceCountedOpenSslContext.class) {
-            try {
-                if (!OpenSsl.useKeyManagerFactory()) {
-                    if (keyManagerFactory != null) {
-                        throw new IllegalArgumentException(
-                                "KeyManagerFactory not supported");
-                    }
-                    if (keyCertChain != null/* && key != null*/) {
-                        setKeyMaterial(ctx, keyCertChain, key, keyPassword);
-                    }
-                } else {
-                    // javadocs state that keyManagerFactory has precedent over keyCertChain
-                    if (keyManagerFactory == null && keyCertChain != null) {
-                        keyManagerFactory = buildKeyManagerFactory(
-                                keyCertChain, key, keyPassword, keyManagerFactory);
-                    }
-
-                    if (keyManagerFactory != null) {
-                        X509KeyManager keyManager = chooseX509KeyManager(keyManagerFactory.getKeyManagers());
-                        OpenSslKeyMaterialManager materialManager = useExtendedKeyManager(keyManager) ?
-                                new OpenSslExtendedKeyMaterialManager(
-                                        (X509ExtendedKeyManager) keyManager, keyPassword) :
-                                new OpenSslKeyMaterialManager(keyManager, keyPassword);
-                        SSLContext.setCertRequestedCallback(ctx, new OpenSslCertificateRequestedCallback(
-                                engineMap, materialManager));
-                    }
+        try {
+            if (!OpenSsl.useKeyManagerFactory()) {
+                if (keyManagerFactory != null) {
+                    throw new IllegalArgumentException(
+                            "KeyManagerFactory not supported");
                 }
-            } catch (Exception e) {
-                throw new SSLException("failed to set certificate and key", e);
+                if (keyCertChain != null/* && key != null*/) {
+                    setKeyMaterial(ctx, keyCertChain, key, keyPassword);
+                }
+            } else {
+                // javadocs state that keyManagerFactory has precedent over keyCertChain
+                if (keyManagerFactory == null && keyCertChain != null) {
+                    keyManagerFactory = buildKeyManagerFactory(
+                            keyCertChain, key, keyPassword, keyManagerFactory);
+                }
+
+                if (keyManagerFactory != null) {
+                    X509KeyManager keyManager = chooseX509KeyManager(keyManagerFactory.getKeyManagers());
+                    OpenSslKeyMaterialManager materialManager = useExtendedKeyManager(keyManager) ?
+                            new OpenSslExtendedKeyMaterialManager(
+                                    (X509ExtendedKeyManager) keyManager, keyPassword) :
+                            new OpenSslKeyMaterialManager(keyManager, keyPassword);
+                    SSLContext.setCertRequestedCallback(ctx, new OpenSslCertificateRequestedCallback(
+                            engineMap, materialManager));
+                }
             }
+        } catch (Exception e) {
+            throw new SSLException("failed to set certificate and key", e);
+        }
 
-            SSLContext.setVerify(ctx, SSL.SSL_VERIFY_NONE, VERIFY_DEPTH);
+        SSLContext.setVerify(ctx, SSL.SSL_CVERIFY_NONE, VERIFY_DEPTH);
 
-            try {
-                if (trustCertCollection != null) {
-                    trustManagerFactory = buildTrustManagerFactory(trustCertCollection, trustManagerFactory);
-                } else if (trustManagerFactory == null) {
-                    trustManagerFactory = TrustManagerFactory.getInstance(
-                            TrustManagerFactory.getDefaultAlgorithm());
-                    trustManagerFactory.init((KeyStore) null);
-                }
-                final X509TrustManager manager = chooseTrustManager(trustManagerFactory.getTrustManagers());
-
-                // IMPORTANT: The callbacks set for verification must be static to prevent memory leak as
-                //            otherwise the context can never be collected. This is because the JNI code holds
-                //            a global reference to the callbacks.
-                //
-                //            See https://github.com/netty/netty/issues/5372
-
-                // Use this to prevent an error when running on java < 7
-                if (useExtendedTrustManager(manager)) {
-                    SSLContext.setCertVerifyCallback(ctx,
-                            new ExtendedTrustManagerVerifyCallback(engineMap, (X509ExtendedTrustManager) manager));
-                } else {
-                    SSLContext.setCertVerifyCallback(ctx, new TrustManagerVerifyCallback(engineMap, manager));
-                }
-            } catch (Exception e) {
-                throw new SSLException("unable to setup trustmanager", e);
+        try {
+            if (trustCertCollection != null) {
+                trustManagerFactory = buildTrustManagerFactory(trustCertCollection, trustManagerFactory);
+            } else if (trustManagerFactory == null) {
+                trustManagerFactory = TrustManagerFactory.getInstance(
+                        TrustManagerFactory.getDefaultAlgorithm());
+                trustManagerFactory.init((KeyStore) null);
             }
+            final X509TrustManager manager = chooseTrustManager(trustManagerFactory.getTrustManagers());
+
+            // IMPORTANT: The callbacks set for verification must be static to prevent memory leak as
+            //            otherwise the context can never be collected. This is because the JNI code holds
+            //            a global reference to the callbacks.
+            //
+            //            See https://github.com/netty/netty/issues/5372
+
+            // Use this to prevent an error when running on java < 7
+            if (useExtendedTrustManager(manager)) {
+                SSLContext.setCertVerifyCallback(ctx,
+                        new ExtendedTrustManagerVerifyCallback(engineMap, (X509ExtendedTrustManager) manager));
+            } else {
+                SSLContext.setCertVerifyCallback(ctx, new TrustManagerVerifyCallback(engineMap, manager));
+            }
+        } catch (Exception e) {
+            throw new SSLException("unable to setup trustmanager", e);
         }
         return new OpenSslClientSessionContext(thiz);
     }

@@ -43,22 +43,22 @@ import static io.netty.util.internal.PlatformDependent.newConcurrentHashMap;
 public class DnsAddressResolverGroup extends AddressResolverGroup<InetSocketAddress> {
 
     private final ChannelFactory<? extends DatagramChannel> channelFactory;
-    private final DnsServerAddresses nameServerAddresses;
+    private final DnsServerAddressStreamProvider nameServerProvider;
 
     private final ConcurrentMap<String, Promise<InetAddress>> resolvesInProgress = newConcurrentHashMap();
     private final ConcurrentMap<String, Promise<List<InetAddress>>> resolveAllsInProgress = newConcurrentHashMap();
 
     public DnsAddressResolverGroup(
             Class<? extends DatagramChannel> channelType,
-            DnsServerAddresses nameServerAddresses) {
-        this(new ReflectiveChannelFactory<DatagramChannel>(channelType), nameServerAddresses);
+            DnsServerAddressStreamProvider nameServerProvider) {
+        this(new ReflectiveChannelFactory<DatagramChannel>(channelType), nameServerProvider);
     }
 
     public DnsAddressResolverGroup(
             ChannelFactory<? extends DatagramChannel> channelFactory,
-            DnsServerAddresses nameServerAddresses) {
+            DnsServerAddressStreamProvider nameServerProvider) {
         this.channelFactory = channelFactory;
-        this.nameServerAddresses = nameServerAddresses;
+        this.nameServerProvider = nameServerProvider;
     }
 
     @SuppressWarnings("deprecation")
@@ -70,24 +70,24 @@ public class DnsAddressResolverGroup extends AddressResolverGroup<InetSocketAddr
                     " (expected: " + StringUtil.simpleClassName(EventLoop.class));
         }
 
-        return newResolver((EventLoop) executor, channelFactory, nameServerAddresses);
+        return newResolver((EventLoop) executor, channelFactory, nameServerProvider);
     }
 
     /**
-     * @deprecated Override {@link #newNameResolver(EventLoop, ChannelFactory, DnsServerAddresses)}.
+     * @deprecated Override {@link #newNameResolver(EventLoop, ChannelFactory, DnsServerAddressStreamProvider)}.
      */
     @Deprecated
     protected AddressResolver<InetSocketAddress> newResolver(
             EventLoop eventLoop, ChannelFactory<? extends DatagramChannel> channelFactory,
-            DnsServerAddresses nameServerAddresses) throws Exception {
+            DnsServerAddressStreamProvider nameServerProvider) throws Exception {
 
         final NameResolver<InetAddress> resolver = new InflightNameResolver<InetAddress>(
                 eventLoop,
-                newNameResolver(eventLoop, channelFactory, nameServerAddresses),
+                newNameResolver(eventLoop, channelFactory, nameServerProvider),
                 resolvesInProgress,
                 resolveAllsInProgress);
 
-        return new InetSocketAddressResolver(eventLoop, resolver);
+        return newAddressResolver(eventLoop, resolver);
     }
 
     /**
@@ -96,10 +96,21 @@ public class DnsAddressResolverGroup extends AddressResolverGroup<InetSocketAddr
      */
     protected NameResolver<InetAddress> newNameResolver(EventLoop eventLoop,
                                                         ChannelFactory<? extends DatagramChannel> channelFactory,
-                                                        DnsServerAddresses nameServerAddresses) throws Exception {
+                                                        DnsServerAddressStreamProvider nameServerProvider)
+            throws Exception {
         return new DnsNameResolverBuilder(eventLoop)
                 .channelFactory(channelFactory)
-                .nameServerAddresses(nameServerAddresses)
+                .nameServerProvider(nameServerProvider)
                 .build();
+    }
+
+    /**
+     * Creates a new {@link AddressResolver}. Override this method to create an alternative {@link AddressResolver}
+     * implementation or override the default configuration.
+     */
+    protected AddressResolver<InetSocketAddress> newAddressResolver(EventLoop eventLoop,
+                                                                    NameResolver<InetAddress> resolver)
+            throws Exception {
+        return new InetSocketAddressResolver(eventLoop, resolver);
     }
 }

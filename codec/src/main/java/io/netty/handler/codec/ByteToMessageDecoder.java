@@ -75,12 +75,12 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
     public static final Cumulator MERGE_CUMULATOR = new Cumulator() {
         @Override
         public ByteBuf cumulate(ByteBufAllocator alloc, ByteBuf cumulation, ByteBuf in) {
-            ByteBuf buffer;
+            final ByteBuf buffer;
             if (cumulation.writerIndex() > cumulation.maxCapacity() - in.readableBytes()
-                    || cumulation.refCnt() > 1) {
+                    || cumulation.refCnt() > 1 || cumulation.isReadOnly()) {
                 // Expand cumulation (by replace it) when either there is not more room in the buffer
                 // or if the refCnt is greater then 1 which may happen when the user use slice().retain() or
-                // duplicate().retain().
+                // duplicate().retain() or if its read-only.
                 //
                 // See:
                 // - https://github.com/netty/netty/issues/2327
@@ -129,16 +129,29 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
         }
     };
 
+    private static final byte STATE_INIT = 0;
+    private static final byte STATE_CALLING_CHILD_DECODE = 1;
+    private static final byte STATE_HANDLER_REMOVED_PENDING = 2;
+
     ByteBuf cumulation;
     private Cumulator cumulator = MERGE_CUMULATOR;
     private boolean singleDecode;
     private boolean decodeWasNull;
     private boolean first;
+    /**
+     * A bitmask where the bits are defined as
+     * <ul>
+     *     <li>{@link #STATE_INIT}</li>
+     *     <li>{@link #STATE_CALLING_CHILD_DECODE}</li>
+     *     <li>{@link #STATE_HANDLER_REMOVED_PENDING}</li>
+     * </ul>
+     */
+    private byte decodeState = STATE_INIT;
     private int discardAfterReads = 16;
     private int numReads;
 
     protected ByteToMessageDecoder() {
-        CodecUtil.ensureNotSharable(this);
+        ensureNotSharable();
     }
 
     /**
@@ -207,6 +220,10 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
 
     @Override
     public final void handlerRemoved(ChannelHandlerContext ctx) throws Exception {
+        if (decodeState == STATE_CALLING_CHILD_DECODE) {
+            decodeState = STATE_HANDLER_REMOVED_PENDING;
+            return;
+        }
         ByteBuf buf = cumulation;
         if (buf != null) {
             // Directly set this to null so we are sure we not access it in any other method here anymore.
@@ -408,7 +425,7 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
                 }
 
                 int oldInputLength = in.readableBytes();
-                decode(ctx, in, out);
+                decodeRemovalReentryProtection(ctx, in, out);
 
                 // Check if this handler was removed before continuing the loop.
                 // If it was removed, it is not safe to continue to operate on the buffer.
@@ -429,7 +446,7 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
                 if (oldInputLength == in.readableBytes()) {
                     throw new DecoderException(
                             StringUtil.simpleClassName(getClass()) +
-                            ".decode() did not read anything but decoded a message.");
+                                    ".decode() did not read anything but decoded a message.");
                 }
 
                 if (isSingleDecode()) {
@@ -451,9 +468,33 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
      * @param ctx           the {@link ChannelHandlerContext} which this {@link ByteToMessageDecoder} belongs to
      * @param in            the {@link ByteBuf} from which to read data
      * @param out           the {@link List} to which decoded messages should be added
-     * @throws Exception    is thrown if an error accour
+     * @throws Exception    is thrown if an error occurs
      */
     protected abstract void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception;
+
+    /**
+     * Decode the from one {@link ByteBuf} to an other. This method will be called till either the input
+     * {@link ByteBuf} has nothing to read when return from this method or till nothing was read from the input
+     * {@link ByteBuf}.
+     *
+     * @param ctx           the {@link ChannelHandlerContext} which this {@link ByteToMessageDecoder} belongs to
+     * @param in            the {@link ByteBuf} from which to read data
+     * @param out           the {@link List} to which decoded messages should be added
+     * @throws Exception    is thrown if an error occurs
+     */
+    final void decodeRemovalReentryProtection(ChannelHandlerContext ctx, ByteBuf in, List<Object> out)
+            throws Exception {
+        decodeState = STATE_CALLING_CHILD_DECODE;
+        try {
+            decode(ctx, in, out);
+        } finally {
+            boolean removePending = decodeState == STATE_HANDLER_REMOVED_PENDING;
+            decodeState = STATE_INIT;
+            if (removePending) {
+                handlerRemoved(ctx);
+            }
+        }
+    }
 
     /**
      * Is called one last time when the {@link ChannelHandlerContext} goes in-active. Which means the
@@ -466,7 +507,7 @@ public abstract class ByteToMessageDecoder extends ChannelInboundHandlerAdapter 
         if (in.isReadable()) {
             // Only call decode() if there is something left in the buffer to decode.
             // See https://github.com/netty/netty/issues/4386
-            decode(ctx, in, out);
+            decodeRemovalReentryProtection(ctx, in, out);
         }
     }
 

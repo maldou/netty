@@ -15,15 +15,28 @@
  */
 package io.netty.buffer;
 
+import io.netty.util.CharsetUtil;
 import io.netty.util.internal.PlatformDependent;
+import org.junit.Assume;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.io.IOException;
 
 public class WrappedUnpooledUnsafeByteBufTest extends BigEndianUnsafeDirectByteBufTest {
 
+    @Before
     @Override
-    protected ByteBuf newBuffer(int length) {
+    public void init() {
+        Assume.assumeTrue("PlatformDependent.useDirectBufferNoCleaner() returned false, skip tests",
+                PlatformDependent.useDirectBufferNoCleaner());
+        super.init();
+    }
+
+    @Override
+    protected ByteBuf newBuffer(int length, int maxCapacity) {
+        Assume.assumeTrue(maxCapacity == Integer.MAX_VALUE);
+
         return new WrappedUnpooledUnsafeDirectByteBuf(UnpooledByteBufAllocator.DEFAULT,
                 PlatformDependent.allocateMemory(length), length, true);
     }
@@ -78,18 +91,6 @@ public class WrappedUnpooledUnsafeByteBufTest extends BigEndianUnsafeDirectByteB
 
     @Test(expected = IndexOutOfBoundsException.class)
     @Override
-    public void testEnsureWritableAfterRelease() {
-        super.testEnsureWritableAfterRelease();
-    }
-
-    @Test(expected = IndexOutOfBoundsException.class)
-    @Override
-    public void testWriteZeroAfterRelease() throws IOException {
-        super.testWriteZeroAfterRelease();
-    }
-
-    @Test(expected = IndexOutOfBoundsException.class)
-    @Override
     public void testGetReadOnlyDirectDst() {
         super.testGetReadOnlyDirectDst();
     }
@@ -122,6 +123,30 @@ public class WrappedUnpooledUnsafeByteBufTest extends BigEndianUnsafeDirectByteB
     @Override
     public void testLittleEndianWithExpand() {
         super.testLittleEndianWithExpand();
+    }
+
+    @Test(expected = IndexOutOfBoundsException.class)
+    @Override
+    public void testWriteUsAsciiCharSequenceExpand() {
+        super.testWriteUsAsciiCharSequenceExpand();
+    }
+
+    @Test(expected = IndexOutOfBoundsException.class)
+    @Override
+    public void testWriteUtf8CharSequenceExpand() {
+        super.testWriteUtf8CharSequenceExpand();
+    }
+
+    @Test(expected = IndexOutOfBoundsException.class)
+    @Override
+    public void testWriteIso88591CharSequenceExpand() {
+        super.testWriteIso88591CharSequenceExpand();
+    }
+
+    @Test(expected = IndexOutOfBoundsException.class)
+    @Override
+    public void testWriteUtf16CharSequenceExpand() {
+        super.testWriteUtf16CharSequenceExpand();
     }
 
     @Test

@@ -61,7 +61,6 @@ public abstract class HttpContentEncoder extends MessageToMessageCodec<HttpReque
     private static final int CONTINUE_CODE = HttpResponseStatus.CONTINUE.code();
 
     private final Queue<CharSequence> acceptEncodingQueue = new ArrayDeque<CharSequence>();
-    private CharSequence acceptEncoding;
     private EmbeddedChannel encoder;
     private State state = State.AWAIT_HEADERS;
 
@@ -99,6 +98,7 @@ public abstract class HttpContentEncoder extends MessageToMessageCodec<HttpReque
 
                 final HttpResponse res = (HttpResponse) msg;
                 final int code = res.status().code();
+                final CharSequence acceptEncoding;
                 if (code == CONTINUE_CODE) {
                     // We need to not poll the encoding when response with CONTINUE as another response will follow
                     // for the issued request. See https://github.com/netty/netty/issues/4079
@@ -164,18 +164,21 @@ public abstract class HttpContentEncoder extends MessageToMessageCodec<HttpReque
                 // so that the message looks like a decoded message.
                 res.headers().set(HttpHeaderNames.CONTENT_ENCODING, result.targetContentEncoding());
 
-                // Make the response chunked to simplify content transformation.
-                res.headers().remove(HttpHeaderNames.CONTENT_LENGTH);
-                res.headers().set(HttpHeaderNames.TRANSFER_ENCODING, HttpHeaderValues.CHUNKED);
-
                 // Output the rewritten response.
                 if (isFull) {
                     // Convert full message into unfull one.
                     HttpResponse newRes = new DefaultHttpResponse(res.protocolVersion(), res.status());
                     newRes.headers().set(res.headers());
                     out.add(newRes);
-                    // Fall through to encode the content of the full response.
+
+                    ensureContent(res);
+                    encodeFullResponse(newRes, (HttpContent) res, out);
+                    break;
                 } else {
+                    // Make the response chunked to simplify content transformation.
+                    res.headers().remove(HttpHeaderNames.CONTENT_LENGTH);
+                    res.headers().set(HttpHeaderNames.TRANSFER_ENCODING, HttpHeaderValues.CHUNKED);
+
                     out.add(res);
                     state = State.AWAIT_CONTENT;
                     if (!(msg instanceof HttpContent)) {
@@ -202,6 +205,25 @@ public abstract class HttpContentEncoder extends MessageToMessageCodec<HttpReque
                 }
                 break;
             }
+        }
+    }
+
+    private void encodeFullResponse(HttpResponse newRes, HttpContent content, List<Object> out) {
+        int existingMessages = out.size();
+        encodeContent(content, out);
+
+        if (HttpUtil.isContentLengthSet(newRes)) {
+            // adjust the content-length header
+            int messageSize = 0;
+            for (int i = existingMessages; i < out.size(); i++) {
+                Object item = out.get(i);
+                if (item instanceof HttpContent) {
+                    messageSize += ((HttpContent) item).content().readableBytes();
+                }
+            }
+            HttpUtil.setContentLength(newRes, messageSize);
+        } else {
+            newRes.headers().set(HttpHeaderNames.TRANSFER_ENCODING, HttpHeaderValues.CHUNKED);
         }
     }
 

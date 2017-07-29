@@ -82,7 +82,7 @@ public class HttpServerKeepAliveHandler extends ChannelDuplexHandler {
             }
         }
         if (msg instanceof LastHttpContent && !shouldKeepAlive()) {
-            promise.addListener(ChannelFutureListener.CLOSE);
+            promise = promise.unvoid().addListener(ChannelFutureListener.CLOSE);
         }
         super.write(ctx, msg, promise);
     }
@@ -103,6 +103,7 @@ public class HttpServerKeepAliveHandler extends ChannelDuplexHandler {
      * <p>
      * <ul>
      *     <li>See <a href="https://tools.ietf.org/html/rfc7230#section-6.3"/></li>
+     *     <li>See <a href="https://tools.ietf.org/html/rfc7230#section-3.3.2"/></li>
      *     <li>See <a href="https://tools.ietf.org/html/rfc7230#section-3.3.3"/></li>
      * </ul>
      *
@@ -112,7 +113,7 @@ public class HttpServerKeepAliveHandler extends ChannelDuplexHandler {
      */
     private static boolean isSelfDefinedMessageLength(HttpResponse response) {
         return isContentLengthSet(response) || isTransferEncodingChunked(response) || isMultipart(response) ||
-               isInformational(response);
+               isInformational(response) || response.status().code() == HttpResponseStatus.NO_CONTENT.code();
     }
 
     private static boolean isInformational(HttpResponse response) {

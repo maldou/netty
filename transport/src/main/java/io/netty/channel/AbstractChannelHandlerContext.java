@@ -24,7 +24,6 @@ import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ResourceLeakHint;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.OrderedEventExecutor;
-import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.PromiseNotificationUtil;
 import io.netty.util.internal.ThrowableUtil;
 import io.netty.util.internal.ObjectUtil;
@@ -43,17 +42,8 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
     volatile AbstractChannelHandlerContext next;
     volatile AbstractChannelHandlerContext prev;
 
-    private static final AtomicIntegerFieldUpdater<AbstractChannelHandlerContext> HANDLER_STATE_UPDATER;
-
-    static {
-        AtomicIntegerFieldUpdater<AbstractChannelHandlerContext> handlerStateUpdater = PlatformDependent
-                .newAtomicIntegerFieldUpdater(AbstractChannelHandlerContext.class, "handlerState");
-        if (handlerStateUpdater == null) {
-            handlerStateUpdater = AtomicIntegerFieldUpdater
-                    .newUpdater(AbstractChannelHandlerContext.class, "handlerState");
-        }
-        HANDLER_STATE_UPDATER = handlerStateUpdater;
-    }
+    private static final AtomicIntegerFieldUpdater<AbstractChannelHandlerContext> HANDLER_STATE_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(AbstractChannelHandlerContext.class, "handlerState");
 
     /**
      * {@link ChannelHandler#handlerAdded(ChannelHandlerContext)} is about to be called.
@@ -199,8 +189,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelHandlerContext fireChannelActive() {
-        final AbstractChannelHandlerContext next = findContextInbound();
-        invokeChannelActive(next);
+        invokeChannelActive(findContextInbound());
         return this;
     }
 
@@ -486,7 +475,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
         if (localAddress == null) {
             throw new NullPointerException("localAddress");
         }
-        if (!validatePromise(promise, false)) {
+        if (isNotValidPromise(promise, false)) {
             // cancelled
             return promise;
         }
@@ -530,7 +519,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
         if (remoteAddress == null) {
             throw new NullPointerException("remoteAddress");
         }
-        if (!validatePromise(promise, false)) {
+        if (isNotValidPromise(promise, false)) {
             // cancelled
             return promise;
         }
@@ -564,7 +553,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelFuture disconnect(final ChannelPromise promise) {
-        if (!validatePromise(promise, false)) {
+        if (isNotValidPromise(promise, false)) {
             // cancelled
             return promise;
         }
@@ -608,7 +597,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelFuture close(final ChannelPromise promise) {
-        if (!validatePromise(promise, false)) {
+        if (isNotValidPromise(promise, false)) {
             // cancelled
             return promise;
         }
@@ -643,7 +632,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
 
     @Override
     public ChannelFuture deregister(final ChannelPromise promise) {
-        if (!validatePromise(promise, false)) {
+        if (isNotValidPromise(promise, false)) {
             // cancelled
             return promise;
         }
@@ -722,7 +711,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
         }
 
         try {
-            if (!validatePromise(promise, true)) {
+            if (isNotValidPromise(promise, true)) {
                 ReferenceCountUtil.release(msg);
                 // cancelled
                 return promise;
@@ -796,7 +785,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
             throw new NullPointerException("msg");
         }
 
-        if (!validatePromise(promise, true)) {
+        if (isNotValidPromise(promise, true)) {
             ReferenceCountUtil.release(msg);
             // cancelled
             return promise;
@@ -843,9 +832,9 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
     }
 
     private static void notifyOutboundHandlerException(Throwable cause, ChannelPromise promise) {
-        if (!(promise instanceof VoidChannelPromise)) {
-            PromiseNotificationUtil.tryFailure(promise, cause, logger);
-        }
+        // Only log if the given promise is not of type VoidChannelPromise as tryFailure(...) is expected to return
+        // false.
+        PromiseNotificationUtil.tryFailure(promise, cause, promise instanceof VoidChannelPromise ? null : logger);
     }
 
     private void notifyHandlerException(Throwable cause) {
@@ -905,7 +894,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
         return new FailedChannelFuture(channel(), executor(), cause);
     }
 
-    private boolean validatePromise(ChannelPromise promise, boolean allowVoidPromise) {
+    private boolean isNotValidPromise(ChannelPromise promise, boolean allowVoidPromise) {
         if (promise == null) {
             throw new NullPointerException("promise");
         }
@@ -916,7 +905,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
             //
             // See https://github.com/netty/netty/issues/2349
             if (promise.isCancelled()) {
-                return false;
+                return true;
             }
             throw new IllegalArgumentException("promise already done: " + promise);
         }
@@ -927,7 +916,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
         }
 
         if (promise.getClass() == DefaultChannelPromise.class) {
-            return true;
+            return false;
         }
 
         if (!allowVoidPromise && promise instanceof VoidChannelPromise) {
@@ -939,7 +928,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
             throw new IllegalArgumentException(
                     StringUtil.simpleClassName(AbstractChannel.CloseFuture.class) + " not allowed in a pipeline");
         }
-        return true;
+        return false;
     }
 
     private AbstractChannelHandlerContext findContextInbound() {
@@ -988,7 +977,7 @@ abstract class AbstractChannelHandlerContext extends DefaultAttributeMap
      * Makes best possible effort to detect if {@link ChannelHandler#handlerAdded(ChannelHandlerContext)} was called
      * yet. If not return {@code false} and if called or could not detect return {@code true}.
      *
-     * If this method returns {@code true} we will not invoke the {@link ChannelHandler} but just forward the event.
+     * If this method returns {@code false} we will not invoke the {@link ChannelHandler} but just forward the event.
      * This is needed as {@link DefaultChannelPipeline} may already put the {@link ChannelHandler} in the linked-list
      * but not called {@link ChannelHandler#handlerAdded(ChannelHandlerContext)}.
      */

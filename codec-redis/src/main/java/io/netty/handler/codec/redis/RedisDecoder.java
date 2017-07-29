@@ -53,7 +53,7 @@ public final class RedisDecoder extends ByteToMessageDecoder {
     }
 
     /**
-     * Creates a new instance with default {@code maxInlineMessageLength} and {@code messageaPool}.
+     * Creates a new instance with default {@code maxInlineMessageLength} and {@code messagePool}.
      */
     public RedisDecoder() {
         // 1024 * 64 is max inline length of current Redis server implementation.
@@ -201,7 +201,7 @@ public final class RedisDecoder extends ByteToMessageDecoder {
     // ${expectedBulkLength}\r\n <here> {data...}\r\n
     private boolean decodeBulkStringContent(ByteBuf in, List<Object> out) throws Exception {
         final int readableBytes = in.readableBytes();
-        if (readableBytes == 0) {
+        if (readableBytes == 0 || remainingBulkLength == 0 && readableBytes < RedisConstants.EOL_LENGTH) {
             return false;
         }
 

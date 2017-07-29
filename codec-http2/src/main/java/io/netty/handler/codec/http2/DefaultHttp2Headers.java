@@ -34,7 +34,7 @@ public class DefaultHttp2Headers
             return !isUpperCase(value);
         }
     };
-    private static final NameValidator<CharSequence> HTTP2_NAME_VALIDATOR = new NameValidator<CharSequence>() {
+    static final NameValidator<CharSequence> HTTP2_NAME_VALIDATOR = new NameValidator<CharSequence>() {
         @Override
         public void validateName(CharSequence name) {
             if (name == null || name.length() == 0) {
@@ -120,11 +120,7 @@ public class DefaultHttp2Headers
 
     @Override
     public boolean equals(Object o) {
-        if (!(o instanceof Http2Headers)) {
-            return false;
-        }
-
-        return equals((Http2Headers) o, CASE_SENSITIVE_HASHER);
+        return o instanceof Http2Headers && equals((Http2Headers) o, CASE_SENSITIVE_HASHER);
     }
 
     @Override

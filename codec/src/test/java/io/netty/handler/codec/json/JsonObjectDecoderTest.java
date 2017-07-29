@@ -72,6 +72,40 @@ public class JsonObjectDecoderTest {
     }
 
     @Test
+    public void testStreamJsonArrayOverMultipleWrites() {
+        EmbeddedChannel ch = new EmbeddedChannel(new JsonObjectDecoder(true));
+
+        String arrayPart1 = "[{\"test";
+        String arrayPart2 = "case\"  : \"\\\"}]Escaped dou\\\"ble quotes \\\" in JSON str\\\"ing\"";
+        String arrayPart3 = "  }\n\n    , ";
+        String arrayPart4 = "{\"testcase\" : \"Streaming string me";
+        String arrayPart5 = "ssage\"} ]";
+
+        // Test array
+        boolean dataAvailable = ch.writeInbound(Unpooled.copiedBuffer("   " + arrayPart1, CharsetUtil.UTF_8));
+        assertFalse(dataAvailable);
+        dataAvailable = ch.writeInbound(Unpooled.copiedBuffer(arrayPart2, CharsetUtil.UTF_8));
+        assertFalse(dataAvailable);
+        dataAvailable = ch.writeInbound(Unpooled.copiedBuffer(arrayPart3, CharsetUtil.UTF_8));
+        assertTrue(dataAvailable);
+        dataAvailable = ch.writeInbound(Unpooled.copiedBuffer(arrayPart4, CharsetUtil.UTF_8));
+        assertTrue(dataAvailable);
+        dataAvailable = ch.writeInbound(Unpooled.copiedBuffer(arrayPart5 + "      ", CharsetUtil.UTF_8));
+        assertTrue(dataAvailable);
+
+        ByteBuf res = ch.readInbound();
+        assertEquals("{\"testcase\"  : \"\\\"}]Escaped dou\\\"ble quotes \\\" in JSON str\\\"ing\"  }",
+                res.toString(CharsetUtil.UTF_8));
+        res.release();
+
+        res = ch.readInbound();
+        assertEquals("{\"testcase\" : \"Streaming string message\"}", res.toString(CharsetUtil.UTF_8));
+        res.release();
+
+        assertFalse(ch.finish());
+    }
+
+    @Test
     public void testSingleByteStream() {
         EmbeddedChannel ch = new EmbeddedChannel(new JsonObjectDecoder());
 
@@ -272,6 +306,38 @@ public class JsonObjectDecoderTest {
         res.release();
         res = ch.readInbound();
         assertEquals(object, res.toString(CharsetUtil.UTF_8));
+        res.release();
+
+        assertFalse(ch.finish());
+    }
+
+    @Test
+    public void testCorruptedFrameException() {
+        final String part1 = "{\"a\":{\"b\":{\"c\":{ \"d\":\"27301\", \"med\":\"d\", \"path\":\"27310\"} }," +
+                " \"status\":\"OK\" } }{\"";
+        final String part2 = "a\":{\"b\":{\"c\":{\"ory\":[{\"competi\":[{\"event\":[{" + "\"externalI\":{\"external\"" +
+                ":[{\"id\":\"O\"} ]";
+
+        EmbeddedChannel ch = new EmbeddedChannel(new JsonObjectDecoder());
+
+        ByteBuf res;
+
+        ch.writeInbound(Unpooled.copiedBuffer(part1, CharsetUtil.UTF_8));
+        res = ch.readInbound();
+        assertEquals("{\"a\":{\"b\":{\"c\":{ \"d\":\"27301\", \"med\":\"d\", \"path\":\"27310\"} }, " +
+                "\"status\":\"OK\" } }", res.toString(CharsetUtil.UTF_8));
+        res.release();
+
+        ch.writeInbound(Unpooled.copiedBuffer(part2, CharsetUtil.UTF_8));
+        res = ch.readInbound();
+
+        assertNull(res);
+
+        ch.writeInbound(Unpooled.copiedBuffer("}}]}]}]}}}}", CharsetUtil.UTF_8));
+        res = ch.readInbound();
+
+        assertEquals("{\"a\":{\"b\":{\"c\":{\"ory\":[{\"competi\":[{\"event\":[{" + "\"externalI\":{" +
+                "\"external\":[{\"id\":\"O\"} ]}}]}]}]}}}}", res.toString(CharsetUtil.UTF_8));
         res.release();
 
         assertFalse(ch.finish());

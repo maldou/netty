@@ -141,7 +141,7 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
     void init(Channel channel) throws Exception {
         final Map<ChannelOption<?>, Object> options = options0();
         synchronized (options) {
-            channel.config().setOptions(options);
+            setChannelOptions(channel, options, logger);
         }
 
         final Map<AttributeKey<?>, Object> attrs = attrs0();
@@ -168,22 +168,18 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
 
         p.addLast(new ChannelInitializer<Channel>() {
             @Override
-            public void initChannel(Channel ch) throws Exception {
+            public void initChannel(final Channel ch) throws Exception {
                 final ChannelPipeline pipeline = ch.pipeline();
                 ChannelHandler handler = config.handler();
                 if (handler != null) {
                     pipeline.addLast(handler);
                 }
 
-                // We add this handler via the EventLoop as the user may have used a ChannelInitializer as handler.
-                // In this case the initChannel(...) method will only be called after this method returns. Because
-                // of this we need to ensure we add our handler in a delayed fashion so all the users handler are
-                // placed in front of the ServerBootstrapAcceptor.
                 ch.eventLoop().execute(new Runnable() {
                     @Override
                     public void run() {
                         pipeline.addLast(new ServerBootstrapAcceptor(
-                                currentChildGroup, currentChildHandler, currentChildOptions, currentChildAttrs));
+                                ch, currentChildGroup, currentChildHandler, currentChildOptions, currentChildAttrs));
                     }
                 });
             }
@@ -204,13 +200,13 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
     }
 
     @SuppressWarnings("unchecked")
-    private static Entry<ChannelOption<?>, Object>[] newOptionArray(int size) {
+    private static Entry<AttributeKey<?>, Object>[] newAttrArray(int size) {
         return new Entry[size];
     }
 
     @SuppressWarnings("unchecked")
-    private static Entry<AttributeKey<?>, Object>[] newAttrArray(int size) {
-        return new Entry[size];
+    private static Map.Entry<ChannelOption<?>, Object>[] newOptionArray(int size) {
+        return new Map.Entry[size];
     }
 
     private static class ServerBootstrapAcceptor extends ChannelInboundHandlerAdapter {
@@ -219,14 +215,27 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
         private final ChannelHandler childHandler;
         private final Entry<ChannelOption<?>, Object>[] childOptions;
         private final Entry<AttributeKey<?>, Object>[] childAttrs;
+        private final Runnable enableAutoReadTask;
 
         ServerBootstrapAcceptor(
-                EventLoopGroup childGroup, ChannelHandler childHandler,
+                final Channel channel, EventLoopGroup childGroup, ChannelHandler childHandler,
                 Entry<ChannelOption<?>, Object>[] childOptions, Entry<AttributeKey<?>, Object>[] childAttrs) {
             this.childGroup = childGroup;
             this.childHandler = childHandler;
             this.childOptions = childOptions;
             this.childAttrs = childAttrs;
+
+            // Task which is scheduled to re-enable auto-read.
+            // It's important to create this Runnable before we try to submit it as otherwise the URLClassLoader may
+            // not be able to load the class because of the file limit it already reached.
+            //
+            // See https://github.com/netty/netty/issues/1328
+            enableAutoReadTask = new Runnable() {
+                @Override
+                public void run() {
+                    channel.config().setAutoRead(true);
+                }
+            };
         }
 
         @Override
@@ -236,15 +245,7 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
 
             child.pipeline().addLast(childHandler);
 
-            for (Entry<ChannelOption<?>, Object> e: childOptions) {
-                try {
-                    if (!child.config().setOption((ChannelOption<Object>) e.getKey(), e.getValue())) {
-                        logger.warn("Unknown channel option: " + e);
-                    }
-                } catch (Throwable t) {
-                    logger.warn("Failed to set a channel option: " + child, t);
-                }
-            }
+            setChannelOptions(child, childOptions, logger);
 
             for (Entry<AttributeKey<?>, Object> e: childAttrs) {
                 child.attr((AttributeKey<Object>) e.getKey()).set(e.getValue());
@@ -266,7 +267,7 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
 
         private static void forceClose(Channel child, Throwable t) {
             child.unsafe().closeForcibly();
-            logger.warn("Failed to register an accepted channel: " + child, t);
+            logger.warn("Failed to register an accepted channel: {}", child, t);
         }
 
         @Override
@@ -276,12 +277,7 @@ public class ServerBootstrap extends AbstractBootstrap<ServerBootstrap, ServerCh
                 // stop accept new connections for 1 second to allow the channel to recover
                 // See https://github.com/netty/netty/issues/1328
                 config.setAutoRead(false);
-                ctx.channel().eventLoop().schedule(new Runnable() {
-                    @Override
-                    public void run() {
-                        config.setAutoRead(true);
-                    }
-                }, 1, TimeUnit.SECONDS);
+                ctx.channel().eventLoop().schedule(enableAutoReadTask, 1, TimeUnit.SECONDS);
             }
             // still let the exceptionCaught event flow through the pipeline to give the user
             // a chance to do something with it

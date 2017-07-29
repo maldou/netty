@@ -574,11 +574,11 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
             do {
                 char firstChar = line.charAt(0);
                 if (name != null && (firstChar == ' ' || firstChar == '\t')) {
-                    StringBuilder buf = new StringBuilder(value.length() + line.length() + 1);
-                    buf.append(value)
-                       .append(' ')
-                       .append(line.toString().trim());
-                    value = buf.toString();
+                    //please do not make one line from below code
+                    //as it breaks +XX:OptimizeStringConcat optimization
+                    String trimmedLine = line.toString().trim();
+                    String valueStr = String.valueOf(value);
+                    value = valueStr + ' ' + trimmedLine;
                 } else {
                     if (name != null) {
                         headers.add(name, value);
@@ -640,14 +640,11 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
                     List<String> current = trailer.trailingHeaders().getAll(lastHeader);
                     if (!current.isEmpty()) {
                         int lastPos = current.size() - 1;
+                        //please do not make one line from below code
+                        //as it breaks +XX:OptimizeStringConcat optimization
                         String lineTrimmed = line.toString().trim();
-                        CharSequence currentLastPos = current.get(lastPos);
-                        StringBuilder b = new StringBuilder(currentLastPos.length() + lineTrimmed.length());
-                        b.append(currentLastPos)
-                         .append(lineTrimmed);
-                        current.set(lastPos, b.toString());
-                    } else {
-                        // Content-Length, Transfer-Encoding, or Trailer
+                        String currentLastPos = current.get(lastPos);
+                        current.set(lastPos, currentLastPos + lineTrimmed);
                     }
                 } else {
                     splitHeader(line);
@@ -804,7 +801,7 @@ public abstract class HttpObjectDecoder extends ByteToMessageDecoder {
 
         @Override
         public boolean process(byte value) throws Exception {
-            char nextByte = (char) value;
+            char nextByte = (char) (value & 0xFF);
             if (nextByte == HttpConstants.CR) {
                 return true;
             }

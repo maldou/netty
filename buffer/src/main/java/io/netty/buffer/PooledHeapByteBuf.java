@@ -1,7 +1,7 @@
 /*
  * Copyright 2012 The Netty Project
  *
- * The Netty Project licenses this file tothe License at:
+ * The Netty Project licenses this file to the License at:
  *
  *   http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -117,8 +117,8 @@ class PooledHeapByteBuf extends PooledByteBuf<byte[]> {
 
     @Override
     public final ByteBuf getBytes(int index, ByteBuffer dst) {
-        checkIndex(index);
-        dst.put(memory, idx(index), Math.min(capacity() - index, dst.remaining()));
+        checkIndex(index, dst.remaining());
+        dst.put(memory, idx(index), dst.remaining());
         return this;
     }
 

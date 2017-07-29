@@ -30,7 +30,10 @@ import java.nio.channels.ClosedChannelException;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 public class SocketShutdownOutputBySelfTest extends AbstractClientSocketTest {
 
@@ -43,9 +46,10 @@ public class SocketShutdownOutputBySelfTest extends AbstractClientSocketTest {
         TestHandler h = new TestHandler();
         ServerSocket ss = new ServerSocket();
         Socket s = null;
+        SocketChannel ch = null;
         try {
-            ss.bind(addr);
-            SocketChannel ch = (SocketChannel) cb.handler(h).connect().sync().channel();
+            ss.bind(newSocketAddress());
+            ch = (SocketChannel) cb.handler(h).connect(ss.getLocalSocketAddress()).sync().channel();
             assertTrue(ch.isActive());
             assertFalse(ch.isOutputShutdown());
 
@@ -68,11 +72,14 @@ public class SocketShutdownOutputBySelfTest extends AbstractClientSocketTest {
             assertTrue(h.ch.isOutputShutdown());
 
             // If half-closed, the peer should be able to write something.
-            s.getOutputStream().write(1);
+            s.getOutputStream().write(new byte[] { 1 });
             assertEquals(1, (int) h.queue.take());
         } finally {
             if (s != null) {
                 s.close();
+            }
+            if (ch != null) {
+                ch.close();
             }
             ss.close();
         }
@@ -88,8 +95,8 @@ public class SocketShutdownOutputBySelfTest extends AbstractClientSocketTest {
         ServerSocket ss = new ServerSocket();
         Socket s = null;
         try {
-            ss.bind(addr);
-            SocketChannel ch = (SocketChannel) cb.handler(h).connect().sync().channel();
+            ss.bind(newSocketAddress());
+            SocketChannel ch = (SocketChannel) cb.handler(h).connect(ss.getLocalSocketAddress()).sync().channel();
             assertTrue(ch.isActive());
             s = ss.accept();
 

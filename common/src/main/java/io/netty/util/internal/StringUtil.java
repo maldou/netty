@@ -27,13 +27,14 @@ import static io.netty.util.internal.ObjectUtil.*;
 public final class StringUtil {
 
     public static final String EMPTY_STRING = "";
-    public static final String NEWLINE = System.getProperty("line.separator");
+    public static final String NEWLINE = SystemPropertyUtil.get("line.separator", "\n");
 
     public static final char DOUBLE_QUOTE = '\"';
     public static final char COMMA = ',';
     public static final char LINE_FEED = '\n';
     public static final char CARRIAGE_RETURN = '\r';
     public static final char TAB = '\t';
+    public static final char SPACE = 0x20;
 
     private static final String[] BYTE2HEX_PAD = new String[256];
     private static final String[] BYTE2HEX_NOPAD = new String[256];
@@ -48,16 +49,16 @@ public final class StringUtil {
     static {
         // Generate the lookup table that converts a byte into a 2-digit hexadecimal integer.
         int i;
-        for (i = 0; i < 10; i ++) {
+        for (i = 0; i < 10; i++) {
             BYTE2HEX_PAD[i] = "0" + i;
             BYTE2HEX_NOPAD[i] = String.valueOf(i);
         }
-        for (; i < 16; i ++) {
+        for (; i < 16; i++) {
             char c = (char) ('a' + i - 10);
             BYTE2HEX_PAD[i] = "0" + c;
             BYTE2HEX_NOPAD[i] = String.valueOf(c);
         }
-        for (; i < BYTE2HEX_PAD.length; i ++) {
+        for (; i < BYTE2HEX_PAD.length; i++) {
             String str = Integer.toHexString(i);
             BYTE2HEX_PAD[i] = str;
             BYTE2HEX_NOPAD[i] = str;
@@ -84,8 +85,8 @@ public final class StringUtil {
     /**
      * Checks if two strings have the same suffix of specified length
      *
-     * @param s            string
-     * @param p            string
+     * @param s   string
+     * @param p   string
      * @param len length of the common suffix
      * @return true if both s and p are not null and both have the same suffix. Otherwise - false
      */
@@ -138,7 +139,7 @@ public final class StringUtil {
      */
     public static <T extends Appendable> T toHexStringPadded(T dst, byte[] src, int offset, int length) {
         final int end = offset + length;
-        for (int i = offset; i < end; i ++) {
+        for (int i = offset; i < end; i++) {
             byteToHexStringPadded(dst, src[i]);
         }
         return dst;
@@ -198,17 +199,80 @@ public final class StringUtil {
         int i;
 
         // Skip preceding zeroes.
-        for (i = offset; i < endMinusOne; i ++) {
+        for (i = offset; i < endMinusOne; i++) {
             if (src[i] != 0) {
                 break;
             }
         }
 
-        byteToHexString(dst, src[i ++]);
+        byteToHexString(dst, src[i++]);
         int remaining = end - i;
         toHexStringPadded(dst, src, i, remaining);
 
         return dst;
+    }
+
+    /**
+     * Helper to decode half of a hexadecimal number from a string.
+     * @param c The ASCII character of the hexadecimal number to decode.
+     * Must be in the range {@code [0-9a-fA-F]}.
+     * @return The hexadecimal value represented in the ASCII character
+     * given, or {@code -1} if the character is invalid.
+     */
+    public static int decodeHexNibble(final char c) {
+        // Character.digit() is not used here, as it addresses a larger
+        // set of characters (both ASCII and full-width latin letters).
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (c >= 'A' && c <= 'F') {
+            return c - 'A' + 0xA;
+        }
+        if (c >= 'a' && c <= 'f') {
+            return c - 'a' + 0xA;
+        }
+        return -1;
+    }
+
+    /**
+     * Decode a 2-digit hex byte from within a string.
+     */
+    public static byte decodeHexByte(CharSequence s, int pos) {
+        int hi = decodeHexNibble(s.charAt(pos));
+        int lo = decodeHexNibble(s.charAt(pos + 1));
+        if (hi == -1 || lo == -1) {
+            throw new IllegalArgumentException(String.format(
+                    "invalid hex byte '%s' at index %d of '%s'", s.subSequence(pos, pos + 2), pos, s));
+        }
+        return (byte) ((hi << 4) + lo);
+    }
+
+    /**
+     * Decodes part of a string with <a href="http://en.wikipedia.org/wiki/Hex_dump">hex dump</a>
+     *
+     * @param hexDump a {@link CharSequence} which contains the hex dump
+     * @param fromIndex start of hex dump in {@code hexDump}
+     * @param length hex string length
+     */
+    public static byte[] decodeHexDump(CharSequence hexDump, int fromIndex, int length) {
+        if (length < 0 || (length & 1) != 0) {
+            throw new IllegalArgumentException("length: " + length);
+        }
+        if (length == 0) {
+            return EmptyArrays.EMPTY_BYTES;
+        }
+        byte[] bytes = new byte[length >>> 1];
+        for (int i = 0; i < length; i += 2) {
+            bytes[i >>> 1] = decodeHexByte(hexDump, fromIndex + i);
+        }
+        return bytes;
+    }
+
+    /**
+     * Decodes a <a href="http://en.wikipedia.org/wiki/Hex_dump">hex dump</a>
+     */
+    public static byte[] decodeHexDump(CharSequence hexDump) {
+        return decodeHexDump(hexDump, 0, hexDump.length());
     }
 
     /**
@@ -227,7 +291,7 @@ public final class StringUtil {
      * with anonymous classes.
      */
     public static String simpleClassName(Class<?> clazz) {
-        String className = ObjectUtil.checkNotNull(clazz, "clazz").getName();
+        String className = checkNotNull(clazz, "clazz").getName();
         final int lastDotIdx = className.lastIndexOf(PACKAGE_SEPARATOR_CHAR);
         if (lastDotIdx > -1) {
             return className.substring(lastDotIdx + 1);
@@ -244,43 +308,95 @@ public final class StringUtil {
      * @return {@link CharSequence} the escaped value if necessary, or the value unchanged
      */
     public static CharSequence escapeCsv(CharSequence value) {
+        return escapeCsv(value, false);
+    }
+
+    /**
+     * Escapes the specified value, if necessary according to
+     * <a href="https://tools.ietf.org/html/rfc4180#section-2">RFC-4180</a>.
+     *
+     * @param value          The value which will be escaped according to
+     *                       <a href="https://tools.ietf.org/html/rfc4180#section-2">RFC-4180</a>
+     * @param trimWhiteSpace The value will first be trimmed of its optional white-space characters,
+     *                       according to <a href="https://tools.ietf.org/html/rfc7230#section-7">RFC-7230</a>
+     * @return {@link CharSequence} the escaped value if necessary, or the value unchanged
+     */
+    public static CharSequence escapeCsv(CharSequence value, boolean trimWhiteSpace) {
         int length = checkNotNull(value, "value").length();
-        if (length == 0) {
-            return value;
+        int start;
+        int last;
+        if (trimWhiteSpace) {
+            start = indexOfFirstNonOwsChar(value, length);
+            last = indexOfLastNonOwsChar(value, start, length);
+        } else {
+            start = 0;
+            last = length - 1;
         }
-        int last = length - 1;
-        boolean quoted = isDoubleQuote(value.charAt(0)) && isDoubleQuote(value.charAt(last)) && length != 1;
-        boolean foundSpecialCharacter = false;
-        boolean escapedDoubleQuote = false;
-        StringBuilder escaped = new StringBuilder(length + CSV_NUMBER_ESCAPE_CHARACTERS).append(DOUBLE_QUOTE);
-        for (int i = 0; i < length; i++) {
-            char current = value.charAt(i);
-            switch (current) {
-                case DOUBLE_QUOTE:
-                    if (i == 0 || i == last) {
-                        if (!quoted) {
-                            escaped.append(DOUBLE_QUOTE);
-                        } else {
-                            continue;
+        if (start > last) {
+            return EMPTY_STRING;
+        }
+
+        int firstUnescapedSpecial = -1;
+        boolean quoted = false;
+        if (isDoubleQuote(value.charAt(start))) {
+            quoted = isDoubleQuote(value.charAt(last)) && last > start;
+            if (quoted) {
+                start++;
+                last--;
+            } else {
+                firstUnescapedSpecial = start;
+            }
+        }
+
+        if (firstUnescapedSpecial < 0) {
+            if (quoted) {
+                for (int i = start; i <= last; i++) {
+                    if (isDoubleQuote(value.charAt(i))) {
+                        if (i == last || !isDoubleQuote(value.charAt(i + 1))) {
+                            firstUnescapedSpecial = i;
+                            break;
                         }
-                    } else {
-                        boolean isNextCharDoubleQuote = isDoubleQuote(value.charAt(i + 1));
-                        if (!isDoubleQuote(value.charAt(i - 1)) &&
-                                (!isNextCharDoubleQuote || i + 1 == last)) {
-                            escaped.append(DOUBLE_QUOTE);
-                            escapedDoubleQuote = true;
-                        }
+                        i++;
+                    }
+                }
+            } else {
+                for (int i = start; i <= last; i++) {
+                    char c = value.charAt(i);
+                    if (c == LINE_FEED || c == CARRIAGE_RETURN || c == COMMA) {
+                        firstUnescapedSpecial = i;
                         break;
                     }
-                case LINE_FEED:
-                case CARRIAGE_RETURN:
-                case COMMA:
-                    foundSpecialCharacter = true;
+                    if (isDoubleQuote(c)) {
+                        if (i == last || !isDoubleQuote(value.charAt(i + 1))) {
+                            firstUnescapedSpecial = i;
+                            break;
+                        }
+                        i++;
+                    }
+                }
             }
-            escaped.append(current);
+
+            if (firstUnescapedSpecial < 0) {
+                // Special characters is not found or all of them already escaped.
+                // In the most cases returns a same string. New string will be instantiated (via StringBuilder)
+                // only if it really needed. It's important to prevent GC extra load.
+                return quoted? value.subSequence(start - 1, last + 2) : value.subSequence(start, last + 1);
+            }
         }
-        return escapedDoubleQuote || foundSpecialCharacter && !quoted ?
-                escaped.append(DOUBLE_QUOTE) : value;
+
+        StringBuilder result = new StringBuilder(last - start + 1 + CSV_NUMBER_ESCAPE_CHARACTERS);
+        result.append(DOUBLE_QUOTE).append(value, start, firstUnescapedSpecial);
+        for (int i = firstUnescapedSpecial; i <= last; i++) {
+            char c = value.charAt(i);
+            if (isDoubleQuote(c)) {
+                result.append(DOUBLE_QUOTE);
+                if (i < last && isDoubleQuote(value.charAt(i + 1))) {
+                    i++;
+                }
+            }
+            result.append(c);
+        }
+        return result.append(DOUBLE_QUOTE);
     }
 
     /**
@@ -390,7 +506,7 @@ public final class StringUtil {
         return unescaped;
     }
 
-    /**s
+    /**
      * Validate if {@code value} is a valid csv field without double-quotes.
      *
      * @throws IllegalArgumentException if {@code value} needs to be encoded with double-quotes.
@@ -429,8 +545,25 @@ public final class StringUtil {
     }
 
     /**
+     * Find the index of the first non-white space character in {@code s} starting at {@code offset}.
+     *
+     * @param seq    The string to search.
+     * @param offset The offset to start searching at.
+     * @return the index of the first non-white space character or &lt;{@code 0} if none was found.
+     */
+    public static int indexOfNonWhiteSpace(CharSequence seq, int offset) {
+        for (; offset < seq.length(); ++offset) {
+            if (!Character.isWhitespace(seq.charAt(offset))) {
+                return offset;
+            }
+        }
+        return -1;
+    }
+
+    /**
      * Determine if {@code c} lies within the range of values defined for
      * <a href="http://unicode.org/glossary/#surrogate_code_point">Surrogate Code Point</a>.
+     *
      * @param c the character to check.
      * @return {@code true} if {@code c} lies within the range of values defined for
      * <a href="http://unicode.org/glossary/#surrogate_code_point">Surrogate Code Point</a>. {@code false} otherwise.
@@ -453,5 +586,48 @@ public final class StringUtil {
     public static boolean endsWith(CharSequence s, char c) {
         int len = s.length();
         return len > 0 && s.charAt(len - 1) == c;
+    }
+
+    /**
+     * Trim optional white-space characters from the specified value,
+     * according to <a href="https://tools.ietf.org/html/rfc7230#section-7">RFC-7230</a>.
+     *
+     * @param value the value to trim
+     * @return {@link CharSequence} the trimmed value if necessary, or the value unchanged
+     */
+    public static CharSequence trimOws(CharSequence value) {
+        final int length = value.length();
+        if (length == 0) {
+            return value;
+        }
+        int start = indexOfFirstNonOwsChar(value, length);
+        int end = indexOfLastNonOwsChar(value, start, length);
+        return start == 0 && end == length - 1 ? value : value.subSequence(start, end + 1);
+    }
+
+    /**
+     * @return {@code length} if no OWS is found.
+     */
+    private static int indexOfFirstNonOwsChar(CharSequence value, int length) {
+        int i = 0;
+        while (i < length && isOws(value.charAt(i))) {
+            i++;
+        }
+        return i;
+    }
+
+    /**
+     * @return {@code start} if no OWS is found.
+     */
+    private static int indexOfLastNonOwsChar(CharSequence value, int start, int length) {
+        int i = length - 1;
+        while (i > start && isOws(value.charAt(i))) {
+            i--;
+        }
+        return i;
+    }
+
+    private static boolean isOws(char c) {
+        return c == SPACE || c == TAB;
     }
 }

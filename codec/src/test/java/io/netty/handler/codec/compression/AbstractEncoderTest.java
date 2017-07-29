@@ -19,6 +19,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.embedded.EmbeddedChannel;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.experimental.theories.DataPoints;
 import org.junit.experimental.theories.FromDataPoints;
@@ -41,6 +42,14 @@ public abstract class AbstractEncoderTest extends AbstractCompressionTest {
 
     @Before
     public abstract void initChannel();
+
+    @After
+    public void destroyChannel() {
+        if (channel != null) {
+            channel.finishAndReleaseAll();
+            channel = null;
+        }
+    }
 
     @DataPoints("smallData")
     public static ByteBuf[] smallData() {
@@ -111,8 +120,6 @@ public abstract class AbstractEncoderTest extends AbstractCompressionTest {
         while ((msg = channel.readOutbound()) != null) {
             compressed.addComponent(true, msg);
         }
-        ByteBuf decompressed =  decompress(compressed, dataLength);
-        compressed.release();
-        return decompressed;
+        return decompress(compressed, dataLength);
     }
 }

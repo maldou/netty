@@ -103,7 +103,7 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
     }
 
     /**
-     * Rerutns {@code true} if and only if the connection to the destination has been established successfully.
+     * Returns {@code true} if and only if the connection to the destination has been established successfully.
      */
     public final boolean isConnected() {
         return connectPromise.isSuccess();
@@ -208,6 +208,8 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
         if (initialMessage != null) {
             sendToProxyServer(initialMessage);
         }
+
+        readIfNeeded(ctx);
     }
 
     /**
@@ -281,11 +283,9 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
 
     private void setConnectSuccess() {
         finished = true;
-        if (connectTimeoutFuture != null) {
-            connectTimeoutFuture.cancel(false);
-        }
+        cancelConnectTimeoutFuture();
 
-        if (connectPromise.trySuccess(ctx.channel())) {
+        if (!connectPromise.isDone()) {
             boolean removedCodec = true;
 
             removedCodec &= safeRemoveEncoder();
@@ -301,13 +301,12 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
                 if (flushedPrematurely) {
                     ctx.flush();
                 }
+                connectPromise.trySuccess(ctx.channel());
             } else {
                 // We are at inconsistent state because we failed to remove all codec handlers.
                 Exception cause = new ProxyConnectException(
                         "failed to remove all codec handlers added by the proxy handler; bug?");
-                failPendingWrites(cause);
-                ctx.fireExceptionCaught(cause);
-                ctx.close();
+                failPendingWritesAndClose(cause);
             }
         }
     }
@@ -336,22 +335,32 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
 
     private void setConnectFailure(Throwable cause) {
         finished = true;
-        if (connectTimeoutFuture != null) {
-            connectTimeoutFuture.cancel(false);
-        }
+        cancelConnectTimeoutFuture();
 
-        if (!(cause instanceof ProxyConnectException)) {
-            cause = new ProxyConnectException(
-                    exceptionMessage(cause.toString()), cause);
-        }
+        if (!connectPromise.isDone()) {
 
-        if (connectPromise.tryFailure(cause)) {
+            if (!(cause instanceof ProxyConnectException)) {
+                cause = new ProxyConnectException(
+                        exceptionMessage(cause.toString()), cause);
+            }
+
             safeRemoveDecoder();
             safeRemoveEncoder();
+            failPendingWritesAndClose(cause);
+        }
+    }
 
-            failPendingWrites(cause);
-            ctx.fireExceptionCaught(cause);
-            ctx.close();
+    private void failPendingWritesAndClose(Throwable cause) {
+        failPendingWrites(cause);
+        connectPromise.tryFailure(cause);
+        ctx.fireExceptionCaught(cause);
+        ctx.close();
+    }
+
+    private void cancelConnectTimeoutFuture() {
+        if (connectTimeoutFuture != null) {
+            connectTimeoutFuture.cancel(false);
+            connectTimeoutFuture = null;
         }
     }
 
@@ -384,9 +393,7 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
         if (suppressChannelReadComplete) {
             suppressChannelReadComplete = false;
 
-            if (!ctx.channel().config().isAutoRead()) {
-                ctx.read();
-            }
+            readIfNeeded(ctx);
         } else {
             ctx.fireChannelReadComplete();
         }
@@ -409,6 +416,12 @@ public abstract class ProxyHandler extends ChannelDuplexHandler {
             ctx.flush();
         } else {
             flushedPrematurely = true;
+        }
+    }
+
+    private static void readIfNeeded(ChannelHandlerContext ctx) {
+        if (!ctx.channel().config().isAutoRead()) {
+            ctx.read();
         }
     }
 

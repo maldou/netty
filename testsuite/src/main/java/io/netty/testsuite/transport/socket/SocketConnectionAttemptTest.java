@@ -22,7 +22,7 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelOption;
-import io.netty.testsuite.util.TestUtils;
+import io.netty.util.internal.SocketUtils;
 import io.netty.util.NetUtil;
 import io.netty.util.concurrent.GlobalEventExecutor;
 import io.netty.util.concurrent.Promise;
@@ -33,7 +33,6 @@ import org.junit.Test;
 
 import java.io.IOException;
 import java.net.ConnectException;
-import java.net.InetSocketAddress;
 import java.net.Socket;
 
 import static org.hamcrest.CoreMatchers.*;
@@ -44,6 +43,9 @@ public class SocketConnectionAttemptTest extends AbstractClientSocketTest {
 
     private static final String BAD_HOST = SystemPropertyUtil.get("io.netty.testsuite.badHost", "netty.io");
     private static final int BAD_PORT = SystemPropertyUtil.getInt("io.netty.testsuite.badPort", 65535);
+
+    // See /etc/services
+    private static final int UNASSIGNED_PORT = 4;
 
     static {
         InternalLogger logger = InternalLoggerFactory.getInstance(SocketConnectionAttemptTest.class);
@@ -89,14 +91,13 @@ public class SocketConnectionAttemptTest extends AbstractClientSocketTest {
         ChannelHandler handler = new ChannelInboundHandlerAdapter() {
             @Override
             public void channelActive(ChannelHandlerContext ctx) throws Exception {
-                Channel channel = ctx.channel();
                 errorPromise.setFailure(new AssertionError("should have never been called"));
             }
         };
 
         cb.handler(handler);
         cb.option(ChannelOption.ALLOW_HALF_CLOSURE, halfClosure);
-        ChannelFuture future = cb.connect(NetUtil.LOCALHOST, TestUtils.getFreePort()).awaitUninterruptibly();
+        ChannelFuture future = cb.connect(NetUtil.LOCALHOST, UNASSIGNED_PORT).awaitUninterruptibly();
         assertThat(future.cause(), is(instanceOf(ConnectException.class)));
         assertThat(errorPromise.cause(), is(nullValue()));
     }
@@ -108,7 +109,7 @@ public class SocketConnectionAttemptTest extends AbstractClientSocketTest {
         boolean badHostTimedOut = true;
         Socket socket = new Socket();
         try {
-            socket.connect(new InetSocketAddress(BAD_HOST, BAD_PORT), 10);
+            SocketUtils.connect(socket, SocketUtils.socketAddress(BAD_HOST, BAD_PORT), 10);
         } catch (ConnectException e) {
             badHostTimedOut = false;
             // is thrown for no route to host when using Socket connect

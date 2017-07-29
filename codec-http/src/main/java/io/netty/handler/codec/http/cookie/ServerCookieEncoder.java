@@ -20,7 +20,9 @@ import static io.netty.handler.codec.http.cookie.CookieUtil.addQuoted;
 import static io.netty.handler.codec.http.cookie.CookieUtil.stringBuilder;
 import static io.netty.handler.codec.http.cookie.CookieUtil.stripTrailingSeparator;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
-import io.netty.handler.codec.http.HttpHeaderDateFormat;
+
+import io.netty.handler.codec.DateFormatter;
+import io.netty.handler.codec.http.HttpConstants;
 import io.netty.handler.codec.http.HttpRequest;
 
 import java.util.ArrayList;
@@ -102,7 +104,11 @@ public final class ServerCookieEncoder extends CookieEncoder {
         if (cookie.maxAge() != Long.MIN_VALUE) {
             add(buf, CookieHeaderNames.MAX_AGE, cookie.maxAge());
             Date expires = new Date(cookie.maxAge() * 1000 + System.currentTimeMillis());
-            add(buf, CookieHeaderNames.EXPIRES, HttpHeaderDateFormat.get().format(expires));
+            buf.append(CookieHeaderNames.EXPIRES);
+            buf.append((char) HttpConstants.EQUALS);
+            DateFormatter.append(expires, buf);
+            buf.append((char) HttpConstants.SEMICOLON);
+            buf.append((char) HttpConstants.SP);
         }
 
         if (cookie.path() != null) {
@@ -128,7 +134,7 @@ public final class ServerCookieEncoder extends CookieEncoder {
      * @param nameToLastIndex A map from cookie name to index of last cookie instance.
      * @return The encoded list with all but the last instance of a named cookie.
      */
-    private List<String> dedup(List<String> encoded, Map<String, Integer> nameToLastIndex) {
+    private static List<String> dedup(List<String> encoded, Map<String, Integer> nameToLastIndex) {
         boolean[] isLastInstance = new boolean[encoded.size()];
         for (int idx : nameToLastIndex.values()) {
             isLastInstance[idx] = true;
@@ -207,7 +213,7 @@ public final class ServerCookieEncoder extends CookieEncoder {
         Map<String, Integer> nameToIndex = strict && cookiesIt.hasNext() ? new HashMap<String, Integer>() : null;
         int i = 0;
         encoded.add(encode(firstCookie));
-        boolean hasDupdName = nameToIndex != null ? nameToIndex.put(firstCookie.name(), i++) != null : false;
+        boolean hasDupdName = nameToIndex != null && nameToIndex.put(firstCookie.name(), i++) != null;
         while (cookiesIt.hasNext()) {
             Cookie c = cookiesIt.next();
             encoded.add(encode(c));

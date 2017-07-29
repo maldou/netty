@@ -16,7 +16,6 @@
 package io.netty.util.concurrent;
 
 import io.netty.util.internal.ObjectUtil;
-import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
@@ -73,25 +72,11 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         }
     };
 
-    private static final AtomicIntegerFieldUpdater<SingleThreadEventExecutor> STATE_UPDATER;
-    private static final AtomicReferenceFieldUpdater<SingleThreadEventExecutor, ThreadProperties> PROPERTIES_UPDATER;
-
-    static {
-        AtomicIntegerFieldUpdater<SingleThreadEventExecutor> updater =
-                PlatformDependent.newAtomicIntegerFieldUpdater(SingleThreadEventExecutor.class, "state");
-        if (updater == null) {
-            updater = AtomicIntegerFieldUpdater.newUpdater(SingleThreadEventExecutor.class, "state");
-        }
-        STATE_UPDATER = updater;
-
-        AtomicReferenceFieldUpdater<SingleThreadEventExecutor, ThreadProperties> propertiesUpdater =
-                PlatformDependent.newAtomicReferenceFieldUpdater(SingleThreadEventExecutor.class, "threadProperties");
-        if (propertiesUpdater == null) {
-            propertiesUpdater = AtomicReferenceFieldUpdater.newUpdater(SingleThreadEventExecutor.class,
-                                                                   ThreadProperties.class, "threadProperties");
-        }
-        PROPERTIES_UPDATER = propertiesUpdater;
-    }
+    private static final AtomicIntegerFieldUpdater<SingleThreadEventExecutor> STATE_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(SingleThreadEventExecutor.class, "state");
+    private static final AtomicReferenceFieldUpdater<SingleThreadEventExecutor, ThreadProperties> PROPERTIES_UPDATER =
+            AtomicReferenceFieldUpdater.newUpdater(
+                    SingleThreadEventExecutor.class, ThreadProperties.class, "threadProperties");
 
     private final Queue<Runnable> taskQueue;
 
@@ -211,14 +196,14 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     /**
-     * @see {@link Queue#poll()}
+     * @see Queue#poll()
      */
     protected Runnable pollTask() {
         assert inEventLoop();
         return pollTaskFrom(taskQueue);
     }
 
-    protected final Runnable pollTaskFrom(Queue<Runnable> taskQueue) {
+    protected static Runnable pollTaskFrom(Queue<Runnable> taskQueue) {
         for (;;) {
             Runnable task = taskQueue.poll();
             if (task == WAKEUP_TASK) {
@@ -299,7 +284,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     /**
-     * @see {@link Queue#peek()}
+     * @see Queue#peek()
      */
     protected Runnable peekTask() {
         assert inEventLoop();
@@ -307,7 +292,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     /**
-     * @see {@link Queue#isEmpty()}
+     * @see Queue#isEmpty()
      */
     protected boolean hasTasks() {
         assert inEventLoop();
@@ -345,7 +330,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     /**
-     * @see {@link Queue#remove(Object)}
+     * @see Queue#remove(Object)
      */
     protected boolean removeTask(Runnable task) {
         if (task == null) {
@@ -383,7 +368,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
      *
      * @param taskQueue To poll and execute all tasks.
      *
-     * @return {@code true} if atleast one task was executed.
+     * @return {@code true} if at least one task was executed.
      */
     protected final boolean runAllTasksFrom(Queue<Runnable> taskQueue) {
         Runnable task = pollTaskFrom(taskQueue);
@@ -481,7 +466,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     protected void wakeup(boolean inEventLoop) {
-        if (!inEventLoop || STATE_UPDATER.get(this) == ST_SHUTTING_DOWN) {
+        if (!inEventLoop || state == ST_SHUTTING_DOWN) {
             // Use offer as we actually only need this to unblock the thread and if offer fails we do not care as there
             // is already something in the queue.
             taskQueue.offer(WAKEUP_TASK);
@@ -575,7 +560,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
             }
             int newState;
             wakeup = true;
-            oldState = STATE_UPDATER.get(this);
+            oldState = state;
             if (inEventLoop) {
                 newState = ST_SHUTTING_DOWN;
             } else {
@@ -628,7 +613,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
             }
             int newState;
             wakeup = true;
-            oldState = STATE_UPDATER.get(this);
+            oldState = state;
             if (inEventLoop) {
                 newState = ST_SHUTDOWN;
             } else {
@@ -659,17 +644,17 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
     @Override
     public boolean isShuttingDown() {
-        return STATE_UPDATER.get(this) >= ST_SHUTTING_DOWN;
+        return state >= ST_SHUTTING_DOWN;
     }
 
     @Override
     public boolean isShutdown() {
-        return STATE_UPDATER.get(this) >= ST_SHUTDOWN;
+        return state >= ST_SHUTDOWN;
     }
 
     @Override
     public boolean isTerminated() {
-        return STATE_UPDATER.get(this) == ST_TERMINATED;
+        return state == ST_TERMINATED;
     }
 
     /**
@@ -850,7 +835,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     private static final long SCHEDULE_PURGE_INTERVAL = TimeUnit.SECONDS.toNanos(1);
 
     private void startThread() {
-        if (STATE_UPDATER.get(this) == ST_NOT_STARTED) {
+        if (state == ST_NOT_STARTED) {
             if (STATE_UPDATER.compareAndSet(this, ST_NOT_STARTED, ST_STARTED)) {
                 doStartThread();
             }
@@ -876,7 +861,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
                     logger.warn("Unexpected exception from an event executor: ", t);
                 } finally {
                     for (;;) {
-                        int oldState = STATE_UPDATER.get(SingleThreadEventExecutor.this);
+                        int oldState = state;
                         if (oldState >= ST_SHUTTING_DOWN || STATE_UPDATER.compareAndSet(
                                 SingleThreadEventExecutor.this, oldState, ST_SHUTTING_DOWN)) {
                             break;

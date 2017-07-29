@@ -16,14 +16,17 @@ package io.netty.handler.codec.http2;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandler;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.ByteToMessageDecoder;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http2.Http2Exception.CompositeStreamException;
 import io.netty.handler.codec.http2.Http2Exception.StreamException;
+import io.netty.util.CharsetUtil;
 import io.netty.util.concurrent.ScheduledFuture;
 import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
@@ -65,6 +68,11 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(Http2ConnectionHandler.class);
 
+    private static final Http2Headers HEADERS_TOO_LARGE_HEADERS = ReadOnlyHttp2Headers.serverHeaders(false,
+            HttpResponseStatus.REQUEST_HEADER_FIELDS_TOO_LARGE.codeAsText());
+    private static final ByteBuf HTTP_1_X_BUF = Unpooled.unreleasableBuffer(
+        Unpooled.wrappedBuffer(new byte[] {'H', 'T', 'T', 'P', '/', '1', '.'})).asReadOnly();
+
     private final Http2ConnectionDecoder decoder;
     private final Http2ConnectionEncoder encoder;
     private final Http2Settings initialSettings;
@@ -84,7 +92,8 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
 
     /**
      * Get the amount of time (in milliseconds) this endpoint will wait for all streams to be closed before closing
-     * the connection during the graceful shutdown process.
+     * the connection during the graceful shutdown process. Returns -1 if this connection is configured to wait
+     * indefinitely for all streams to close.
      */
     public long gracefulShutdownTimeoutMillis() {
         return gracefulShutdownTimeoutMillis;
@@ -97,9 +106,9 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
      * streams to be closed before closing the connection during the graceful shutdown process.
      */
     public void gracefulShutdownTimeoutMillis(long gracefulShutdownTimeoutMillis) {
-        if (gracefulShutdownTimeoutMillis < 0) {
+        if (gracefulShutdownTimeoutMillis < -1) {
             throw new IllegalArgumentException("gracefulShutdownTimeoutMillis: " + gracefulShutdownTimeoutMillis +
-                                               " (expected: >= 0)");
+                                               " (expected: -1 for indefinite or >= 0)");
         }
         this.gracefulShutdownTimeoutMillis = gracefulShutdownTimeoutMillis;
     }
@@ -157,12 +166,14 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
 
     @Override
     public void flush(ChannelHandlerContext ctx) throws Http2Exception {
-        // Trigger pending writes in the remote flow controller.
-        encoder.flowController().writePendingBytes();
         try {
+            // Trigger pending writes in the remote flow controller.
+            encoder.flowController().writePendingBytes();
             ctx.flush();
-        } catch (Throwable t) {
-            throw new Http2Exception(INTERNAL_ERROR, "Error flushing" , t);
+        } catch (Http2Exception e) {
+            onError(ctx, e);
+        } catch (Throwable cause) {
+            onError(ctx, connectionError(INTERNAL_ERROR, cause, "Error flushing"));
         }
     }
 
@@ -266,6 +277,13 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
             if (bytesRead == 0 || !ByteBufUtil.equals(in, in.readerIndex(),
                                                       clientPrefaceString, clientPrefaceString.readerIndex(),
                                                       bytesRead)) {
+                int maxSearch = 1024; // picked because 512 is too little, and 2048 too much
+                int http1Index =
+                    ByteBufUtil.indexOf(HTTP_1_X_BUF, in.slice(in.readerIndex(), min(in.readableBytes(), maxSearch)));
+                if (http1Index != -1) {
+                    String chunk = in.toString(in.readerIndex(), http1Index - in.readerIndex(), CharsetUtil.US_ASCII);
+                    throw connectionError(PROTOCOL_ERROR, "Unexpected HTTP/1.x request: %s", chunk);
+                }
                 String receivedBytes = hexDump(in, in.readerIndex(),
                                                min(in.readableBytes(), clientPrefaceString.readableBytes()));
                 throw connectionError(PROTOCOL_ERROR, "HTTP/2 client preface string missing or corrupt. " +
@@ -320,6 +338,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
             if (!connection().isServer()) {
                 // Clients must send the preface string as the first bytes on the connection.
                 ctx.write(connectionPrefaceBuf()).addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+                ctx.fireUserEventTriggered(Http2ConnectionPrefaceWrittenEvent.INSTANCE);
             }
 
             // Both client and server must send their initial settings.
@@ -436,8 +455,12 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
             future.addListener(new ClosingChannelFutureListener(ctx, promise));
         } else {
             // If there are active streams we should wait until they are all closed before closing the connection.
-            closeListener = new ClosingChannelFutureListener(ctx, promise,
-                                                             gracefulShutdownTimeoutMillis, MILLISECONDS);
+            if (gracefulShutdownTimeoutMillis < 0) {
+                closeListener = new ClosingChannelFutureListener(ctx, promise);
+            } else {
+                closeListener = new ClosingChannelFutureListener(ctx, promise,
+                                                                 gracefulShutdownTimeoutMillis, MILLISECONDS);
+            }
         }
     }
 
@@ -600,7 +623,55 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
      */
     protected void onStreamError(ChannelHandlerContext ctx, @SuppressWarnings("unused") Throwable cause,
                                  StreamException http2Ex) {
-        resetStream(ctx, http2Ex.streamId(), http2Ex.error().code(), ctx.newPromise());
+        final int streamId = http2Ex.streamId();
+        Http2Stream stream = connection().stream(streamId);
+
+        //if this is caused by reading headers that are too large, send a header with status 431
+        if (http2Ex instanceof Http2Exception.HeaderListSizeException &&
+            ((Http2Exception.HeaderListSizeException) http2Ex).duringDecode() &&
+            connection().isServer()) {
+
+            // NOTE We have to check to make sure that a stream exists before we send our reply.
+            // We likely always create the stream below as the stream isn't created until the
+            // header block is completely processed.
+
+            // The case of a streamId referring to a stream which was already closed is handled
+            // by createStream and will land us in the catch block below
+            if (stream == null) {
+                try {
+                    stream = encoder.connection().remote().createStream(streamId, true);
+                } catch (Http2Exception e) {
+                    resetUnknownStream(ctx, streamId, http2Ex.error().code(), ctx.newPromise());
+                    return;
+                }
+            }
+
+            // ensure that we have not already sent headers on this stream
+            if (stream != null && !stream.isHeadersSent()) {
+                try {
+                    handleServerHeaderDecodeSizeError(ctx, stream);
+                } catch (Throwable cause2) {
+                    onError(ctx, connectionError(INTERNAL_ERROR, cause2, "Error DecodeSizeError"));
+                }
+            }
+        }
+
+        if (stream == null) {
+            resetUnknownStream(ctx, streamId, http2Ex.error().code(), ctx.newPromise());
+        } else {
+            resetStream(ctx, stream, http2Ex.error().code(), ctx.newPromise());
+        }
+    }
+
+    /**
+     * Notifies client that this server has received headers that are larger than what it is
+     * willing to accept. Override to change behavior.
+     *
+     * @param ctx the channel context
+     * @param stream the Http2Stream on which the header was received
+     */
+    protected void handleServerHeaderDecodeSizeError(ChannelHandlerContext ctx, Http2Stream stream) {
+        encoder().writeHeaders(ctx, stream.id(), HEADERS_TOO_LARGE_HEADERS, 0, true, ctx.newPromise());
     }
 
     protected Http2FrameWriter frameWriter() {
@@ -631,22 +702,29 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
     @Override
     public ChannelFuture resetStream(final ChannelHandlerContext ctx, int streamId, long errorCode,
                                      ChannelPromise promise) {
-        promise = promise.unvoid();
         final Http2Stream stream = connection().stream(streamId);
         if (stream == null) {
-            return resetUnknownStream(ctx, streamId, errorCode, promise);
+            return resetUnknownStream(ctx, streamId, errorCode, promise.unvoid());
         }
 
+       return resetStream(ctx, stream, errorCode, promise);
+    }
+
+    private ChannelFuture resetStream(final ChannelHandlerContext ctx, final Http2Stream stream,
+                                      long errorCode, ChannelPromise promise) {
+        promise = promise.unvoid();
         if (stream.isResetSent()) {
             // Don't write a RST_STREAM frame if we have already written one.
             return promise.setSuccess();
         }
         final ChannelFuture future;
-        if (stream.state() == IDLE) {
-            // We cannot write RST_STREAM frames on IDLE streams https://tools.ietf.org/html/rfc7540#section-6.4.
+        // If the remote peer is not aware of the steam, then we are not allowed to send a RST_STREAM
+        // https://tools.ietf.org/html/rfc7540#section-6.4.
+        if (stream.state() == IDLE ||
+            connection().local().created(stream) && !stream.isHeadersSent() && !stream.isPushPromiseSent()) {
             future = promise.setSuccess();
         } else {
-            future = frameWriter().writeRstStream(ctx, streamId, errorCode, promise);
+            future = frameWriter().writeRstStream(ctx, stream.id(), errorCode, promise);
         }
 
         // Synchronously set the resetSent flag to prevent any subsequent calls
@@ -677,7 +755,9 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
                 // Protect against re-entrancy. Could happen if writing the frame fails, and error handling
                 // treating this is a connection handler and doing a graceful shutdown...
                 if (lastStreamId == connection().remote().lastStreamKnownByPeer()) {
-                    return promise;
+                    // Release the data and notify the promise
+                    debugData.release();
+                    return promise.setSuccess();
                 }
                 if (lastStreamId > connection.remote().lastStreamKnownByPeer()) {
                     throw connectionError(PROTOCOL_ERROR, "Last stream identifier must not increase between " +

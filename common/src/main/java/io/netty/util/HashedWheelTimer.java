@@ -16,7 +16,6 @@
 package io.netty.util;
 
 import io.netty.util.internal.PlatformDependent;
-import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -26,9 +25,15 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicLong;
+
+import static io.netty.util.internal.StringUtil.simpleClassName;
 
 /**
  * A {@link Timer} optimized for approximated I/O timeout scheduling.
@@ -76,20 +81,16 @@ public class HashedWheelTimer implements Timer {
     static final InternalLogger logger =
             InternalLoggerFactory.getInstance(HashedWheelTimer.class);
 
+    private static final AtomicInteger INSTANCE_COUNTER = new AtomicInteger();
+    private static final AtomicBoolean WARNED_TOO_MANY_INSTANCES = new AtomicBoolean();
+    private static final int INSTANCE_COUNT_LIMIT = 64;
     private static final ResourceLeakDetector<HashedWheelTimer> leakDetector = ResourceLeakDetectorFactory.instance()
-            .newResourceLeakDetector(HashedWheelTimer.class, 1, Runtime.getRuntime().availableProcessors() * 4L);
+            .newResourceLeakDetector(HashedWheelTimer.class, 1);
 
-    private static final AtomicIntegerFieldUpdater<HashedWheelTimer> WORKER_STATE_UPDATER;
-    static {
-        AtomicIntegerFieldUpdater<HashedWheelTimer> workerStateUpdater =
-                PlatformDependent.newAtomicIntegerFieldUpdater(HashedWheelTimer.class, "workerState");
-        if (workerStateUpdater == null) {
-            workerStateUpdater = AtomicIntegerFieldUpdater.newUpdater(HashedWheelTimer.class, "workerState");
-        }
-        WORKER_STATE_UPDATER = workerStateUpdater;
-    }
+    private static final AtomicIntegerFieldUpdater<HashedWheelTimer> WORKER_STATE_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(HashedWheelTimer.class, "workerState");
 
-    private final ResourceLeak leak;
+    private final ResourceLeakTracker<HashedWheelTimer> leak;
     private final Worker worker = new Worker();
     private final Thread workerThread;
 
@@ -105,6 +106,8 @@ public class HashedWheelTimer implements Timer {
     private final CountDownLatch startTimeInitialized = new CountDownLatch(1);
     private final Queue<HashedWheelTimeout> timeouts = PlatformDependent.newMpscQueue();
     private final Queue<HashedWheelTimeout> cancelledTimeouts = PlatformDependent.newMpscQueue();
+    private final AtomicLong pendingTimeouts = new AtomicLong(0);
+    private final long maxPendingTimeouts;
 
     private volatile long startTime;
 
@@ -195,20 +198,48 @@ public class HashedWheelTimer implements Timer {
     /**
      * Creates a new timer.
      *
-     * @param threadFactory  a {@link ThreadFactory} that creates a
-     *                       background {@link Thread} which is dedicated to
-     *                       {@link TimerTask} execution.
-     * @param tickDuration   the duration between tick
-     * @param unit           the time unit of the {@code tickDuration}
-     * @param ticksPerWheel  the size of the wheel
-     * @param leakDetection  {@code true} if leak detection should be enabled always, if false it will only be enabled
-     *                       if the worker thread is not a daemon thread.
+     * @param threadFactory        a {@link ThreadFactory} that creates a
+     *                             background {@link Thread} which is dedicated to
+     *                             {@link TimerTask} execution.
+     * @param tickDuration         the duration between tick
+     * @param unit                 the time unit of the {@code tickDuration}
+     * @param ticksPerWheel        the size of the wheel
+     * @param leakDetection        {@code true} if leak detection should be enabled always,
+     *                             if false it will only be enabled if the worker thread is not
+     *                             a daemon thread.
+     * @throws NullPointerException     if either of {@code threadFactory} and {@code unit} is {@code null}
+     * @throws IllegalArgumentException if either of {@code tickDuration} and {@code ticksPerWheel} is &lt;= 0
+     */
+    public HashedWheelTimer(
+        ThreadFactory threadFactory,
+        long tickDuration, TimeUnit unit, int ticksPerWheel, boolean leakDetection) {
+        this(threadFactory, tickDuration, unit, ticksPerWheel, leakDetection, -1);
+    }
+
+    /**
+     * Creates a new timer.
+     *
+     * @param threadFactory        a {@link ThreadFactory} that creates a
+     *                             background {@link Thread} which is dedicated to
+     *                             {@link TimerTask} execution.
+     * @param tickDuration         the duration between tick
+     * @param unit                 the time unit of the {@code tickDuration}
+     * @param ticksPerWheel        the size of the wheel
+     * @param leakDetection        {@code true} if leak detection should be enabled always,
+     *                             if false it will only be enabled if the worker thread is not
+     *                             a daemon thread.
+     * @param  maxPendingTimeouts  The maximum number of pending timeouts after which call to
+     *                             {@code newTimeout} will result in
+     *                             {@link java.util.concurrent.RejectedExecutionException}
+     *                             being thrown. No maximum pending timeouts limit is assumed if
+     *                             this value is 0 or negative.
      * @throws NullPointerException     if either of {@code threadFactory} and {@code unit} is {@code null}
      * @throws IllegalArgumentException if either of {@code tickDuration} and {@code ticksPerWheel} is &lt;= 0
      */
     public HashedWheelTimer(
             ThreadFactory threadFactory,
-            long tickDuration, TimeUnit unit, int ticksPerWheel, boolean leakDetection) {
+            long tickDuration, TimeUnit unit, int ticksPerWheel, boolean leakDetection,
+            long maxPendingTimeouts) {
 
         if (threadFactory == null) {
             throw new NullPointerException("threadFactory");
@@ -238,7 +269,27 @@ public class HashedWheelTimer implements Timer {
         }
         workerThread = threadFactory.newThread(worker);
 
-        leak = leakDetection || !workerThread.isDaemon() ? leakDetector.open(this) : null;
+        leak = leakDetection || !workerThread.isDaemon() ? leakDetector.track(this) : null;
+
+        this.maxPendingTimeouts = maxPendingTimeouts;
+
+        if (INSTANCE_COUNTER.incrementAndGet() > INSTANCE_COUNT_LIMIT &&
+            WARNED_TOO_MANY_INSTANCES.compareAndSet(false, true)) {
+            reportTooManyInstances();
+        }
+    }
+
+    @Override
+    protected void finalize() throws Throwable {
+        try {
+            super.finalize();
+        } finally {
+            // This object is going to be GCed and it is assumed the ship has sailed to do a proper shutdown. If
+            // we have not yet shutdown then we want to make sure we decrement the active instance count.
+            if (WORKER_STATE_UPDATER.getAndSet(this, WORKER_STATE_SHUTDOWN) != WORKER_STATE_SHUTDOWN) {
+                INSTANCE_COUNTER.decrementAndGet();
+            }
+        }
     }
 
     private static HashedWheelBucket[] createWheel(int ticksPerWheel) {
@@ -310,31 +361,37 @@ public class HashedWheelTimer implements Timer {
 
         if (!WORKER_STATE_UPDATER.compareAndSet(this, WORKER_STATE_STARTED, WORKER_STATE_SHUTDOWN)) {
             // workerState can be 0 or 2 at this moment - let it always be 2.
-            WORKER_STATE_UPDATER.set(this, WORKER_STATE_SHUTDOWN);
-
-            if (leak != null) {
-                leak.close();
+            if (WORKER_STATE_UPDATER.getAndSet(this, WORKER_STATE_SHUTDOWN) != WORKER_STATE_SHUTDOWN) {
+                INSTANCE_COUNTER.decrementAndGet();
+                if (leak != null) {
+                    boolean closed = leak.close(this);
+                    assert closed;
+                }
             }
 
             return Collections.emptySet();
         }
 
-        boolean interrupted = false;
-        while (workerThread.isAlive()) {
-            workerThread.interrupt();
-            try {
-                workerThread.join(100);
-            } catch (InterruptedException ignored) {
-                interrupted = true;
+        try {
+            boolean interrupted = false;
+            while (workerThread.isAlive()) {
+                workerThread.interrupt();
+                try {
+                    workerThread.join(100);
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
             }
-        }
 
-        if (interrupted) {
-            Thread.currentThread().interrupt();
-        }
-
-        if (leak != null) {
-            leak.close();
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        } finally {
+            INSTANCE_COUNTER.decrementAndGet();
+            if (leak != null) {
+                boolean closed = leak.close(this);
+                assert closed;
+            }
         }
         return worker.unprocessedTimeouts();
     }
@@ -347,6 +404,16 @@ public class HashedWheelTimer implements Timer {
         if (unit == null) {
             throw new NullPointerException("unit");
         }
+
+        long pendingTimeoutsCount = pendingTimeouts.incrementAndGet();
+
+        if (maxPendingTimeouts > 0 && pendingTimeoutsCount > maxPendingTimeouts) {
+            pendingTimeouts.decrementAndGet();
+            throw new RejectedExecutionException("Number of pending timeouts ("
+                + pendingTimeoutsCount + ") is greater than or equal to maximum allowed pending "
+                + "timeouts (" + maxPendingTimeouts + ")");
+        }
+
         start();
 
         // Add the timeout to the timeout queue which will be processed on the next tick.
@@ -355,6 +422,20 @@ public class HashedWheelTimer implements Timer {
         HashedWheelTimeout timeout = new HashedWheelTimeout(this, task, deadline);
         timeouts.add(timeout);
         return timeout;
+    }
+
+    /**
+     * Returns the number of pending timeouts of this {@link Timer}.
+     */
+    public long pendingTimeouts() {
+        return pendingTimeouts.get();
+    }
+
+    private static void reportTooManyInstances() {
+        String resourceType = simpleClassName(HashedWheelTimer.class);
+        logger.error("You are creating too many " + resourceType + " instances. " +
+                resourceType + " is a shared resource that must be reused across the JVM," +
+                "so that only a few instances are created.");
     }
 
     private final class Worker implements Runnable {
@@ -495,16 +576,8 @@ public class HashedWheelTimer implements Timer {
         private static final int ST_INIT = 0;
         private static final int ST_CANCELLED = 1;
         private static final int ST_EXPIRED = 2;
-        private static final AtomicIntegerFieldUpdater<HashedWheelTimeout> STATE_UPDATER;
-
-        static {
-            AtomicIntegerFieldUpdater<HashedWheelTimeout> updater =
-                    PlatformDependent.newAtomicIntegerFieldUpdater(HashedWheelTimeout.class, "state");
-            if (updater == null) {
-                updater = AtomicIntegerFieldUpdater.newUpdater(HashedWheelTimeout.class, "state");
-            }
-            STATE_UPDATER = updater;
-        }
+        private static final AtomicIntegerFieldUpdater<HashedWheelTimeout> STATE_UPDATER =
+                AtomicIntegerFieldUpdater.newUpdater(HashedWheelTimeout.class, "state");
 
         private final HashedWheelTimer timer;
         private final TimerTask task;
@@ -558,6 +631,8 @@ public class HashedWheelTimer implements Timer {
             HashedWheelBucket bucket = this.bucket;
             if (bucket != null) {
                 bucket.remove(this);
+            } else {
+                timer.pendingTimeouts.decrementAndGet();
             }
         }
 
@@ -599,7 +674,7 @@ public class HashedWheelTimer implements Timer {
             long remaining = deadline - currentTime + timer.startTime;
 
             StringBuilder buf = new StringBuilder(192)
-               .append(StringUtil.simpleClassName(this))
+               .append(simpleClassName(this))
                .append('(')
                .append("deadline: ");
             if (remaining > 0) {
@@ -656,8 +731,9 @@ public class HashedWheelTimer implements Timer {
 
             // process all timeouts
             while (timeout != null) {
-                boolean remove = false;
+                HashedWheelTimeout next = timeout.next;
                 if (timeout.remainingRounds <= 0) {
+                    next = remove(timeout);
                     if (timeout.deadline <= deadline) {
                         timeout.expire();
                     } else {
@@ -665,22 +741,16 @@ public class HashedWheelTimer implements Timer {
                         throw new IllegalStateException(String.format(
                                 "timeout.deadline (%d) > deadline (%d)", timeout.deadline, deadline));
                     }
-                    remove = true;
                 } else if (timeout.isCancelled()) {
-                    remove = true;
+                    next = remove(timeout);
                 } else {
                     timeout.remainingRounds --;
-                }
-                // store reference to next as we may null out timeout.next in the remove block.
-                HashedWheelTimeout next = timeout.next;
-                if (remove) {
-                    remove(timeout);
                 }
                 timeout = next;
             }
         }
 
-        public void remove(HashedWheelTimeout timeout) {
+        public HashedWheelTimeout remove(HashedWheelTimeout timeout) {
             HashedWheelTimeout next = timeout.next;
             // remove timeout that was either processed or cancelled by updating the linked-list
             if (timeout.prev != null) {
@@ -706,6 +776,8 @@ public class HashedWheelTimer implements Timer {
             timeout.prev = null;
             timeout.next = null;
             timeout.bucket = null;
+            timeout.timer.pendingTimeouts.decrementAndGet();
+            return next;
         }
 
         /**

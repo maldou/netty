@@ -163,13 +163,17 @@ public final class InternalThreadLocalMap extends UnpaddedInternalThreadLocalMap
     }
 
     public StringBuilder stringBuilder() {
-        StringBuilder builder = stringBuilder;
-        if (builder == null) {
-            stringBuilder = builder = new StringBuilder(512);
+        final int stringBuilderCapacity = 1024;
+        if (stringBuilder == null) {
+            stringBuilder = new StringBuilder(stringBuilderCapacity);
         } else {
-            builder.setLength(0);
+            if (stringBuilder.capacity() > stringBuilderCapacity) {
+                stringBuilder.setLength(stringBuilderCapacity);
+                stringBuilder.trimToSize();
+            }
+            stringBuilder.setLength(0);
         }
-        return builder;
+        return stringBuilder;
     }
 
     public Map<Charset, CharsetEncoder> charsetEncoderCache() {
@@ -192,14 +196,15 @@ public final class InternalThreadLocalMap extends UnpaddedInternalThreadLocalMap
         return arrayList(DEFAULT_ARRAY_LIST_INITIAL_CAPACITY);
     }
 
+    @SuppressWarnings("unchecked")
     public <E> ArrayList<E> arrayList(int minCapacity) {
         ArrayList<E> list = (ArrayList<E>) arrayList;
         if (list == null) {
-            list = (ArrayList<E>) new ArrayList<Object>(minCapacity);
-        } else {
-            list.clear();
-            list.ensureCapacity(minCapacity);
+            arrayList = new ArrayList<Object>(minCapacity);
+            return (ArrayList<E>) arrayList;
         }
+        list.clear();
+        list.ensureCapacity(minCapacity);
         return list;
     }
 

@@ -22,7 +22,6 @@ import io.netty.channel.DefaultChannelConfig;
 import io.netty.channel.MessageSizeEstimator;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.WriteBufferWaterMark;
-
 import java.io.IOException;
 import java.util.Map;
 
@@ -86,6 +85,10 @@ public class EpollChannelConfig extends DefaultChannelConfig {
 
     @Override
     public EpollChannelConfig setRecvByteBufAllocator(RecvByteBufAllocator allocator) {
+        if (!(allocator.newHandle() instanceof RecvByteBufAllocator.ExtendedHandle)) {
+            throw new IllegalArgumentException("allocator.newHandle() must return an object of type: " +
+                    RecvByteBufAllocator.ExtendedHandle.class);
+        }
         super.setRecvByteBufAllocator(allocator);
         return this;
     }

@@ -18,8 +18,8 @@ package io.netty.util.internal;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
-import java.io.Closeable;
 import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -30,7 +30,9 @@ import java.net.URL;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Helper class to load JNI resources.
@@ -43,6 +45,7 @@ public final class NativeLibraryLoader {
     private static final String NATIVE_RESOURCE_HOME = "META-INF/native/";
     private static final String OSNAME;
     private static final File WORKDIR;
+    private static final boolean DELETE_NATIVE_LIB_AFTER_LOADING;
 
     static {
         OSNAME = SystemPropertyUtil.get("os.name", "").toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", "");
@@ -64,6 +67,9 @@ public final class NativeLibraryLoader {
             WORKDIR = tmpdir();
             logger.debug("-Dio.netty.native.workdir: " + WORKDIR + " (io.netty.tmpdir)");
         }
+
+        DELETE_NATIVE_LIB_AFTER_LOADING = SystemPropertyUtil.getBoolean(
+                "io.netty.native.deleteLibAfterLoading", true);
     }
 
     private static File tmpdir() {
@@ -175,9 +181,32 @@ public final class NativeLibraryLoader {
     }
 
     /**
+     * The shading prefix added to this class's full name.
+     *
+     * @throws UnsatisfiedLinkError if the shader used something other than a prefix
+     */
+    private static String calculatePackagePrefix() {
+        String maybeShaded = NativeLibraryLoader.class.getName();
+        // Use ! instead of . to avoid shading utilities from modifying the string
+        String expected = "io!netty!util!internal!NativeLibraryLoader".replace('!', '.');
+        if (!maybeShaded.endsWith(expected)) {
+            throw new UnsatisfiedLinkError(String.format(
+                    "Could not find prefix added to %s to get %s. When shading, only adding a "
+                    + "package prefix is supported", expected, maybeShaded));
+        }
+        return maybeShaded.substring(0, maybeShaded.length() - expected.length());
+    }
+
+    /**
      * Load the given library with the specified {@link ClassLoader}
      */
-    public static void load(String name, ClassLoader loader) {
+    public static void load(String originalName, ClassLoader loader) {
+        // Adjust expected name to support shading of native libraries.
+        String implicitPackagePrefix = calculatePackagePrefix();
+        // The system property should not be necessary; it can be removed in the future.
+        String packagePrefix = SystemPropertyUtil.get("io.netty.packagePrefix", implicitPackagePrefix);
+        String name = packagePrefix.replace('.', '-') + originalName;
+
         String libname = System.mapLibraryName(name);
         String path = NATIVE_RESOURCE_HOME + libname;
 
@@ -220,6 +249,20 @@ public final class NativeLibraryLoader {
             out = null;
 
             loadLibrary(loader, tmpFile.getPath(), true);
+        } catch (UnsatisfiedLinkError e) {
+            try {
+                if (tmpFile != null && tmpFile.isFile() && tmpFile.canRead() &&
+                    !NoexecVolumeDetector.canExecuteExecutable(tmpFile)) {
+                    logger.info("{} exists but cannot be executed even when execute permissions set; " +
+                                "check volume for \"noexec\" flag; use -Dio.netty.native.workdir=[path] " +
+                                "to set native working directory separately.",
+                                tmpFile.getPath());
+                }
+            } catch (Throwable t) {
+                logger.debug("Error checking if {} is on a file store mounted with noexec", tmpFile, t);
+            }
+            // Re-throw to fail the load
+            throw e;
         } catch (Exception e) {
             throw (UnsatisfiedLinkError) new UnsatisfiedLinkError(
                     "could not load a native library: " + name).initCause(e);
@@ -229,7 +272,7 @@ public final class NativeLibraryLoader {
             // After we load the library it is safe to delete the file.
             // We delete the file immediately to free up resources as soon as possible,
             // and if this fails fallback to deleting on JVM exit.
-            if (tmpFile != null && !tmpFile.delete()) {
+            if (tmpFile != null && (!DELETE_NATIVE_LIB_AFTER_LOADING || !tmpFile.delete())) {
                 tmpFile.deleteOnExit();
             }
         }
@@ -263,8 +306,7 @@ public final class NativeLibraryLoader {
                 try {
                     // Invoke the helper to load the native library, if succeed, then the native
                     // library belong to the specified ClassLoader.
-                    Method method = helper.getMethod("loadLibrary",
-                            new Class<?>[] { String.class, boolean.class });
+                    Method method = helper.getMethod("loadLibrary", String.class, boolean.class);
                     method.setAccessible(true);
                     return method.invoke(null, name, absolute);
                 } catch (Exception e) {
@@ -364,5 +406,46 @@ public final class NativeLibraryLoader {
 
     private NativeLibraryLoader() {
         // Utility
+    }
+
+    private static final class NoexecVolumeDetector {
+
+        private static boolean canExecuteExecutable(File file) throws IOException {
+            if (PlatformDependent.javaVersion() < 7) {
+                // Pre-JDK7, the Java API did not directly support POSIX permissions; instead of implementing a custom
+                // work-around, assume true, which disables the check.
+                return true;
+            }
+
+            // If we can already execute, there is nothing to do.
+            if (file.canExecute()) {
+                return true;
+            }
+
+            // On volumes, with noexec set, even files with the executable POSIX permissions will fail to execute.
+            // The File#canExecute() method honors this behavior, probaby via parsing the noexec flag when initializing
+            // the UnixFileStore, though the flag is not exposed via a public API.  To find out if library is being
+            // loaded off a volume with noexec, confirm or add executalbe permissions, then check File#canExecute().
+
+            // Note: We use FQCN to not break when netty is used in java6
+            Set<java.nio.file.attribute.PosixFilePermission> existingFilePermissions =
+                    java.nio.file.Files.getPosixFilePermissions(file.toPath());
+            Set<java.nio.file.attribute.PosixFilePermission> executePermissions =
+                    EnumSet.of(java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE,
+                            java.nio.file.attribute.PosixFilePermission.GROUP_EXECUTE,
+                            java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE);
+            if (existingFilePermissions.containsAll(executePermissions)) {
+                return false;
+            }
+
+            Set<java.nio.file.attribute.PosixFilePermission> newPermissions = EnumSet.copyOf(existingFilePermissions);
+            newPermissions.addAll(executePermissions);
+            java.nio.file.Files.setPosixFilePermissions(file.toPath(), newPermissions);
+            return file.canExecute();
+        }
+
+        private NoexecVolumeDetector() {
+            // Utility
+        }
     }
 }

@@ -21,6 +21,7 @@ import io.netty.channel.SelectStrategy;
 import io.netty.channel.SingleThreadEventLoop;
 import io.netty.channel.epoll.AbstractEpollChannel.AbstractEpollUnsafe;
 import io.netty.channel.unix.FileDescriptor;
+import io.netty.channel.unix.IovArray;
 import io.netty.util.IntSupplier;
 import io.netty.util.collection.IntObjectHashMap;
 import io.netty.util.collection.IntObjectMap;
@@ -43,15 +44,13 @@ import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
  */
 final class EpollEventLoop extends SingleThreadEventLoop {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(EpollEventLoop.class);
-    private static final AtomicIntegerFieldUpdater<EpollEventLoop> WAKEN_UP_UPDATER;
+    private static final AtomicIntegerFieldUpdater<EpollEventLoop> WAKEN_UP_UPDATER =
+            AtomicIntegerFieldUpdater.newUpdater(EpollEventLoop.class, "wakenUp");
 
     static {
-        AtomicIntegerFieldUpdater<EpollEventLoop> updater =
-                PlatformDependent.newAtomicIntegerFieldUpdater(EpollEventLoop.class, "wakenUp");
-        if (updater == null) {
-            updater = AtomicIntegerFieldUpdater.newUpdater(EpollEventLoop.class, "wakenUp");
-        }
-        WAKEN_UP_UPDATER = updater;
+        // Ensure JNI is initialized by the time this class is loaded by this time!
+        // We use unix-common methods in this class which are backed by JNI methods.
+        Epoll.ensureAvailability();
     }
 
     private final FileDescriptor epollFd;
@@ -140,7 +139,7 @@ final class EpollEventLoop extends SingleThreadEventLoop {
      */
     void add(AbstractEpollChannel ch) throws IOException {
         assert inEventLoop();
-        int fd = ch.fd().intValue();
+        int fd = ch.socket.intValue();
         Native.epollCtlAdd(epollFd.intValue(), fd, ch.flags);
         channels.put(fd, ch);
     }
@@ -150,7 +149,7 @@ final class EpollEventLoop extends SingleThreadEventLoop {
      */
     void modify(AbstractEpollChannel ch) throws IOException {
         assert inEventLoop();
-        Native.epollCtlMod(epollFd.intValue(), ch.fd().intValue(), ch.flags);
+        Native.epollCtlMod(epollFd.intValue(), ch.socket.intValue(), ch.flags);
     }
 
     /**
@@ -160,7 +159,7 @@ final class EpollEventLoop extends SingleThreadEventLoop {
         assert inEventLoop();
 
         if (ch.isOpen()) {
-            int fd = ch.fd().intValue();
+            int fd = ch.socket.intValue();
             if (channels.remove(fd) != null) {
                 // Remove the epoll. This is only needed if it's still open as otherwise it will be automatically
                 // removed once the file-descriptor is closed.
@@ -172,7 +171,8 @@ final class EpollEventLoop extends SingleThreadEventLoop {
     @Override
     protected Queue<Runnable> newTaskQueue(int maxPendingTasks) {
         // This event loop never calls takeTask()
-        return PlatformDependent.newMpscQueue(maxPendingTasks);
+        return maxPendingTasks == Integer.MAX_VALUE ? PlatformDependent.<Runnable>newMpscQueue()
+                                                    : PlatformDependent.<Runnable>newMpscQueue(maxPendingTasks);
     }
 
     @Override
@@ -285,30 +285,42 @@ final class EpollEventLoop extends SingleThreadEventLoop {
                         if (wakenUp == 1) {
                             Native.eventFdWrite(eventFd.intValue(), 1L);
                         }
-                    default:
                         // fallthrough
+                    default:
                 }
 
                 final int ioRatio = this.ioRatio;
                 if (ioRatio == 100) {
-                    if (strategy > 0) {
-                        processReady(events, strategy);
+                    try {
+                        if (strategy > 0) {
+                            processReady(events, strategy);
+                        }
+                    } finally {
+                        // Ensure we always run tasks.
+                        runAllTasks();
                     }
-                    runAllTasks();
                 } else {
                     final long ioStartTime = System.nanoTime();
 
-                    if (strategy > 0) {
-                        processReady(events, strategy);
+                    try {
+                        if (strategy > 0) {
+                            processReady(events, strategy);
+                        }
+                    } finally {
+                        // Ensure we always run tasks.
+                        final long ioTime = System.nanoTime() - ioStartTime;
+                        runAllTasks(ioTime * (100 - ioRatio) / ioRatio);
                     }
-
-                    final long ioTime = System.nanoTime() - ioStartTime;
-                    runAllTasks(ioTime * (100 - ioRatio) / ioRatio);
                 }
                 if (allowGrowing && strategy == events.length()) {
                     //increase the size of the array as we needed the whole space for the events
                     events.increase();
                 }
+            } catch (Throwable t) {
+                handleLoopException(t);
+            }
+            // Always handle shutdown even if the loop processing threw an exception.
+            try {
                 if (isShuttingDown()) {
                     closeAll();
                     if (confirmShutdown()) {
@@ -316,16 +328,20 @@ final class EpollEventLoop extends SingleThreadEventLoop {
                     }
                 }
             } catch (Throwable t) {
-                logger.warn("Unexpected exception in the selector loop.", t);
-
-                // Prevent possible consecutive immediate failures that lead to
-                // excessive CPU consumption.
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException e) {
-                    // Ignore.
-                }
+                handleLoopException(t);
             }
+        }
+    }
+
+    private static void handleLoopException(Throwable t) {
+        logger.warn("Unexpected exception in the selector loop.", t);
+
+        // Prevent possible consecutive immediate failures that lead to
+        // excessive CPU consumption.
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            // Ignore.
         }
     }
 
@@ -335,6 +351,8 @@ final class EpollEventLoop extends SingleThreadEventLoop {
         } catch (IOException ignore) {
             // ignore on close
         }
+        // Using the intermediate collection to prevent ConcurrentModificationException.
+        // In the `close()` method, the channel is deleted from `channels` map.
         Collection<AbstractEpollChannel> array = new ArrayList<AbstractEpollChannel>(channels.size());
 
         for (AbstractEpollChannel channel: channels.values()) {

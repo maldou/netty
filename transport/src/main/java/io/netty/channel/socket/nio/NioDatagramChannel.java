@@ -30,6 +30,7 @@ import io.netty.channel.nio.AbstractNioMessageChannel;
 import io.netty.channel.socket.DatagramChannelConfig;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.InternetProtocolFamily;
+import io.netty.util.internal.SocketUtils;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.StringUtil;
 
@@ -193,7 +194,7 @@ public final class NioDatagramChannel
 
     private void doBind0(SocketAddress localAddress) throws Exception {
         if (PlatformDependent.javaVersion() >= 7) {
-            javaChannel().bind(localAddress);
+            SocketUtils.bind(javaChannel(), localAddress);
         } else {
             javaChannel().socket().bind(localAddress);
         }
@@ -594,5 +595,15 @@ public final class NioDatagramChannel
 
     void clearReadPending0() {
         clearReadPending();
+    }
+
+    @Override
+    protected boolean closeOnReadError(Throwable cause) {
+        // We do not want to close on SocketException when using DatagramChannel as we usually can continue receiving.
+        // See https://github.com/netty/netty/issues/5893
+        if (cause instanceof SocketException) {
+            return false;
+        }
+        return super.closeOnReadError(cause);
     }
 }

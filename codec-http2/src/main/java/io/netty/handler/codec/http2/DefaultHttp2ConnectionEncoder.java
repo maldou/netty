@@ -21,11 +21,12 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.CoalescingBufferQueue;
-import io.netty.handler.codec.http2.Http2Exception.ClosedStreamCreationException;
+import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.util.internal.UnstableApi;
 
 import java.util.ArrayDeque;
 
+import static io.netty.handler.codec.http.HttpStatusClass.INFORMATIONAL;
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_PRIORITY_WEIGHT;
 import static io.netty.handler.codec.http2.Http2Error.PROTOCOL_ERROR;
 import static io.netty.handler.codec.http2.Http2Exception.connectionError;
@@ -77,7 +78,7 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
     public void remoteSettings(Http2Settings settings) throws Http2Exception {
         Boolean pushEnabled = settings.pushEnabled();
         Http2FrameWriter.Configuration config = configuration();
-        Http2HeaderTable outboundHeaderTable = config.headerTable();
+        Http2HeadersEncoder.Configuration outboundHeaderConfig = config.headersConfiguration();
         Http2FrameSizePolicy outboundFrameSizePolicy = config.frameSizePolicy();
         if (pushEnabled != null) {
             if (!connection.isServer() && pushEnabled) {
@@ -89,18 +90,17 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
 
         Long maxConcurrentStreams = settings.maxConcurrentStreams();
         if (maxConcurrentStreams != null) {
-            // TODO(scott): define an extension setting so we can communicate/enforce the maxStreams limit locally.
-            connection.local().maxStreams((int) min(maxConcurrentStreams, MAX_VALUE), MAX_VALUE);
+            connection.local().maxActiveStreams((int) min(maxConcurrentStreams, MAX_VALUE));
         }
 
         Long headerTableSize = settings.headerTableSize();
         if (headerTableSize != null) {
-            outboundHeaderTable.maxHeaderTableSize((int) min(headerTableSize, MAX_VALUE));
+            outboundHeaderConfig.maxHeaderTableSize((int) min(headerTableSize, MAX_VALUE));
         }
 
-        Integer maxHeaderListSize = settings.maxHeaderListSize();
+        Long maxHeaderListSize = settings.maxHeaderListSize();
         if (maxHeaderListSize != null) {
-            outboundHeaderTable.maxHeaderListSize(maxHeaderListSize);
+            outboundHeaderConfig.maxHeaderListSize(maxHeaderListSize);
         }
 
         Integer maxFrameSize = settings.maxFrameSize();
@@ -128,8 +128,7 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
                     // Allowed sending DATA frames in these states.
                     break;
                 default:
-                    throw new IllegalStateException(String.format(
-                            "Stream %d in unexpected state: %s", stream.id(), stream.state()));
+                    throw new IllegalStateException("Stream " + stream.id() + " in unexpected state " + stream.state());
             }
         } catch (Throwable e) {
             data.release();
@@ -148,6 +147,15 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
         return writeHeaders(ctx, streamId, headers, 0, DEFAULT_PRIORITY_WEIGHT, false, padding, endStream, promise);
     }
 
+    private static boolean validateHeadersSentState(Http2Stream stream, Http2Headers headers, boolean isServer,
+                                                    boolean endOfStream) {
+        boolean isInformational = isServer && HttpStatusClass.valueOf(headers.status()) == INFORMATIONAL;
+        if ((isInformational || !endOfStream) && stream.isHeadersSent() || stream.isTrailersSent()) {
+            throw new IllegalStateException("Stream " + stream.id() + " sent too many headers EOS: " + endOfStream);
+        }
+        return isInformational;
+    }
+
     @Override
     public ChannelFuture writeHeaders(final ChannelHandlerContext ctx, final int streamId,
             final Http2Headers headers, final int streamDependency, final short weight,
@@ -155,7 +163,15 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
         try {
             Http2Stream stream = connection.stream(streamId);
             if (stream == null) {
-                stream = connection.local().createStream(streamId, endOfStream);
+                try {
+                    stream = connection.local().createStream(streamId, endOfStream);
+                } catch (Http2Exception cause) {
+                    if (connection.remote().mayHaveCreatedStream(streamId)) {
+                        promise.tryFailure(new IllegalStateException("Stream no longer exists: " + streamId, cause));
+                        return promise;
+                    }
+                    throw cause;
+                }
             } else {
                 switch (stream.state()) {
                     case RESERVED_LOCAL:
@@ -166,8 +182,8 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
                         // Allowed sending headers in these states.
                         break;
                     default:
-                        throw new IllegalStateException(String.format(
-                                "Stream %d in unexpected state: %s", stream.id(), stream.state()));
+                        throw new IllegalStateException("Stream " + stream.id() + " in unexpected state " +
+                                                        stream.state());
                 }
             }
 
@@ -175,6 +191,7 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
             // for this stream.
             Http2RemoteFlowController flowController = flowController();
             if (!endOfStream || !flowController.hasFlowControlled(stream)) {
+                boolean isInformational = validateHeadersSentState(stream, headers, connection.isServer(), endOfStream);
                 if (endOfStream) {
                     final Http2Stream finalStream = stream;
                     final ChannelFutureListener closeStreamLocalListener = new ChannelFutureListener() {
@@ -185,43 +202,37 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
                     };
                     promise = promise.unvoid().addListener(closeStreamLocalListener);
                 }
-                return frameWriter.writeHeaders(ctx, streamId, headers, streamDependency, weight,
-                                                exclusive, padding, endOfStream, promise);
+
+                ChannelFuture future = frameWriter.writeHeaders(ctx, streamId, headers, streamDependency,
+                                                                weight, exclusive, padding, endOfStream, promise);
+                // Writing headers may fail during the encode state if they violate HPACK limits.
+                Throwable failureCause = future.cause();
+                if (failureCause == null) {
+                    // Synchronously set the headersSent flag to ensure that we do not subsequently write
+                    // other headers containing pseudo-header fields.
+                    stream.headersSent(isInformational);
+                } else {
+                    lifecycleManager.onError(ctx, failureCause);
+                }
+
+                return future;
             } else {
                 // Pass headers to the flow-controller so it can maintain their sequence relative to DATA frames.
                 flowController.addFlowControlled(stream,
                         new FlowControlledHeaders(stream, headers, streamDependency, weight, exclusive, padding,
-                                                 endOfStream, promise));
+                                                  true, promise));
                 return promise;
             }
-        } catch (Http2NoMoreStreamIdsException e) {
-            lifecycleManager.onError(ctx, e);
-            return promise.setFailure(e);
-        } catch (Throwable e) {
-            return promise.setFailure(e);
+        } catch (Throwable t) {
+            lifecycleManager.onError(ctx, t);
+            promise.tryFailure(t);
+            return promise;
         }
     }
 
     @Override
     public ChannelFuture writePriority(ChannelHandlerContext ctx, int streamId, int streamDependency, short weight,
             boolean exclusive, ChannelPromise promise) {
-        try {
-            // Update the priority on this stream.
-            Http2Stream stream = connection.stream(streamId);
-            if (stream == null) {
-                stream = connection.local().createIdleStream(streamId);
-            }
-
-            // The set priority operation must be done before sending the frame. The parent may not yet exist
-            // and the priority tree may also be modified before sending.
-            stream.setPriority(streamDependency, weight, exclusive);
-        } catch (ClosedStreamCreationException ignored) {
-            // It is possible that either the stream for this frame or the parent stream is closed.
-            // In this case we should ignore the exception and allow the frame to be sent.
-        } catch (Throwable t) {
-            return promise.setFailure(t);
-        }
-
         return frameWriter.writePriority(ctx, streamId, streamDependency, weight, exclusive, promise);
     }
 
@@ -269,11 +280,22 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
             Http2Stream stream = requireStream(streamId);
             // Reserve the promised stream.
             connection.local().reservePushStream(promisedStreamId, stream);
-        } catch (Throwable e) {
-            return promise.setFailure(e);
-        }
 
-        return frameWriter.writePushPromise(ctx, streamId, promisedStreamId, headers, padding, promise);
+            ChannelFuture future = frameWriter.writePushPromise(ctx, streamId, promisedStreamId, headers, padding,
+                                                                promise);
+            // Writing headers may fail during the encode state if they violate HPACK limits.
+            Throwable failureCause = future.cause();
+            if (failureCause == null) {
+                stream.pushPromiseSent();
+            } else {
+                lifecycleManager.onError(ctx, failureCause);
+            }
+            return future;
+        } catch (Throwable t) {
+            lifecycleManager.onError(ctx, t);
+            promise.tryFailure(t);
+            return promise;
+        }
     }
 
     @Override
@@ -377,17 +399,17 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
             }
 
             // Determine how much data to write.
-            int writeableData = min(queuedData, allowedBytes);
+            int writableData = min(queuedData, allowedBytes);
             ChannelPromise writePromise = ctx.newPromise().addListener(this);
-            ByteBuf toWrite = queue.remove(writeableData, writePromise);
+            ByteBuf toWrite = queue.remove(writableData, writePromise);
             dataSize = queue.readableBytes();
 
             // Determine how much padding to write.
-            int writeablePadding = min(allowedBytes - writeableData, padding);
-            padding -= writeablePadding;
+            int writablePadding = min(allowedBytes - writableData, padding);
+            padding -= writablePadding;
 
             // Write the frame(s).
-            frameWriter().writeData(ctx, stream.id(), toWrite, writeablePadding,
+            frameWriter().writeData(ctx, stream.id(), toWrite, writablePadding,
                     endOfStream && size() == 0, writePromise);
         }
 
@@ -442,13 +464,21 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
 
         @Override
         public void write(ChannelHandlerContext ctx, int allowedBytes) {
+            boolean isInformational = validateHeadersSentState(stream, headers, connection.isServer(), endOfStream);
             if (promise.isVoid()) {
                 promise = ctx.newPromise();
             }
             promise.addListener(this);
 
-            frameWriter.writeHeaders(ctx, stream.id(), headers, streamDependency, weight, exclusive,
-                    padding, endOfStream, promise);
+            ChannelFuture f = frameWriter.writeHeaders(ctx, stream.id(), headers, streamDependency, weight, exclusive,
+                                                       padding, endOfStream, promise);
+            // Writing headers may fail during the encode state if they violate HPACK limits.
+            Throwable failureCause = f.cause();
+            if (failureCause == null) {
+                stream.headersSent(isInformational);
+            } else {
+                lifecycleManager.onError(ctx, failureCause);
+            }
         }
 
         @Override
@@ -467,7 +497,7 @@ public class DefaultHttp2ConnectionEncoder implements Http2ConnectionEncoder {
         protected boolean endOfStream;
         protected int padding;
 
-        protected FlowControlledBase(final Http2Stream stream, int padding, boolean endOfStream,
+        FlowControlledBase(final Http2Stream stream, int padding, boolean endOfStream,
                 final ChannelPromise promise) {
             if (padding < 0) {
                 throw new IllegalArgumentException("padding must be >= 0");

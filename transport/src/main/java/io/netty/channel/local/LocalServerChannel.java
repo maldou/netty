@@ -46,6 +46,10 @@ public class LocalServerChannel extends AbstractServerChannel {
     private volatile LocalAddress localAddress;
     private volatile boolean acceptInProgress;
 
+    public LocalServerChannel() {
+        config().setAllocator(new PreferHeapByteBufAllocator(config.getAllocator()));
+    }
+
     @Override
     public ChannelConfig config() {
         return config;
@@ -133,7 +137,7 @@ public class LocalServerChannel extends AbstractServerChannel {
     }
 
     LocalChannel serve(final LocalChannel peer) {
-        final LocalChannel child = new LocalChannel(this, peer);
+        final LocalChannel child = newLocalChannel(peer);
         if (eventLoop().inEventLoop()) {
             serve0(child);
         } else {
@@ -145,6 +149,14 @@ public class LocalServerChannel extends AbstractServerChannel {
             });
         }
         return child;
+    }
+
+    /**
+     * A factory method for {@link LocalChannel}s. Users may override it
+     * to create custom instances of {@link LocalChannel}s.
+     */
+    protected LocalChannel newLocalChannel(LocalChannel peer) {
+        return new LocalChannel(this, peer);
     }
 
     private void serve0(final LocalChannel child) {

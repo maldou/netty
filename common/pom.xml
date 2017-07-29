@@ -21,7 +21,7 @@
   <parent>
     <groupId>io.netty</groupId>
     <artifactId>netty-parent</artifactId>
-    <version>4.1.6.Final-SNAPSHOT</version>
+    <version>4.1.14.Final-SNAPSHOT</version>
   </parent>
 
   <artifactId>netty-common</artifactId>
@@ -37,13 +37,6 @@
   </properties>
 
   <dependencies>
-    <!-- Byte code generator - completely optional -->
-    <dependency>
-      <groupId>org.javassist</groupId>
-      <artifactId>javassist</artifactId>
-      <scope>compile</scope> <!-- override the 'test' scope defined at parent pom.xml -->
-      <optional>true</optional>
-    </dependency>
     <dependency>
       <groupId>org.jctools</groupId>
       <artifactId>jctools-core</artifactId>
@@ -77,6 +70,10 @@
       <artifactId>log4j-core</artifactId>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+    </dependency>
   </dependencies>
 
   <build>
@@ -105,6 +102,30 @@
             </configuration>
           </execution>
         </executions>
+        <!-- Needed to support JDK9 -->
+        <!-- See https://github.com/netty/netty/issues/6100 -->
+        <dependencies>
+          <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm</artifactId>
+            <version>${asm.version}</version>
+          </dependency>
+          <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm-commons</artifactId>
+            <version>${asm.version}</version>
+          </dependency>
+          <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm-analysis</artifactId>
+            <version>${asm.version}</version>
+          </dependency>
+          <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm-util</artifactId>
+            <version>${asm.version}</version>
+          </dependency>
+        </dependencies>
       </plugin>
       <!-- Add generated collection sources. -->
       <plugin>
@@ -148,7 +169,7 @@
           <dependency>
             <groupId>org.codehaus.groovy</groupId>
             <artifactId>groovy-all</artifactId>
-            <version>2.4.7</version>
+            <version>2.4.8</version>
           </dependency>
           <dependency>
             <groupId>ant</groupId>

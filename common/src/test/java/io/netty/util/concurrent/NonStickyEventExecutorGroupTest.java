@@ -15,6 +15,7 @@
  */
 package io.netty.util.concurrent;
 
+import io.netty.util.NettyRuntime;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -58,7 +59,7 @@ public class NonStickyEventExecutorGroupTest {
 
     @Test(timeout = 10000)
     public void testOrdering() throws Throwable {
-        final int threads = Runtime.getRuntime().availableProcessors() * 2;
+        final int threads = NettyRuntime.availableProcessors() * 2;
         final EventExecutorGroup group = new UnorderedThreadPoolEventExecutor(threads);
         final NonStickyEventExecutorGroup nonStickyGroup = new NonStickyEventExecutorGroup(group, maxTaskExecutePerRun);
         try {
@@ -104,7 +105,7 @@ public class NonStickyEventExecutorGroupTest {
 
         for (int i = 1 ; i <= tasks; i++) {
             final int id = i;
-            executor.execute(new Runnable() {
+            futures.add(executor.submit(new Runnable() {
                 @Override
                 public void run() {
                     try {
@@ -122,7 +123,7 @@ public class NonStickyEventExecutorGroupTest {
                         latch.countDown();
                     }
                 }
-            });
+            }));
         }
         latch.await();
         for (Future<?> future: futures) {

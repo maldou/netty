@@ -25,11 +25,12 @@ import io.netty.handler.codec.http.EmptyHttpHeaders;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpClientCodec;
+import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpRequestEncoder;
 import io.netty.handler.codec.http.HttpResponseDecoder;
 import io.netty.util.CharsetUtil;
-import io.netty.util.internal.ThreadLocalRandom;
+import io.netty.util.internal.PlatformDependent;
 import org.junit.Test;
 
 import java.net.URI;
@@ -41,12 +42,55 @@ public abstract class WebSocketClientHandshakerTest {
     protected abstract WebSocketClientHandshaker newHandshaker(URI uri);
 
     @Test
+    public void testHostHeader() {
+        testHostHeaderDefaultHttp(URI.create("ws://localhost:80/"), "localhost");
+        testHostHeaderDefaultHttp(URI.create("http://localhost:80/"), "localhost");
+        testHostHeaderDefaultHttp(URI.create("ws://[::1]:80/"), "[::1]");
+        testHostHeaderDefaultHttp(URI.create("http://[::1]:80/"), "[::1]");
+        testHostHeaderDefaultHttp(URI.create("ws://localhost:9999/"), "localhost:9999");
+        testHostHeaderDefaultHttp(URI.create("http://localhost:9999/"), "localhost:9999");
+        testHostHeaderDefaultHttp(URI.create("ws://[::1]:9999/"), "[::1]:9999");
+        testHostHeaderDefaultHttp(URI.create("http://[::1]:9999/"), "[::1]:9999");
+
+        testHostHeaderDefaultHttp(URI.create("wss://localhost:443/"), "localhost");
+        testHostHeaderDefaultHttp(URI.create("https://localhost:443/"), "localhost");
+        testHostHeaderDefaultHttp(URI.create("wss://[::1]:443/"), "[::1]");
+        testHostHeaderDefaultHttp(URI.create("https://[::1]:443/"), "[::1]");
+        testHostHeaderDefaultHttp(URI.create("wss://localhost:9999/"), "localhost:9999");
+        testHostHeaderDefaultHttp(URI.create("https://localhost:9999/"), "localhost:9999");
+        testHostHeaderDefaultHttp(URI.create("wss://[::1]:9999/"), "[::1]:9999");
+        testHostHeaderDefaultHttp(URI.create("https://[::1]:9999/"), "[::1]:9999");
+    }
+
+    private void testHostHeaderDefaultHttp(URI uri, String expected) {
+        WebSocketClientHandshaker handshaker = newHandshaker(uri);
+        FullHttpRequest request = handshaker.newHandshakeRequest();
+        try {
+            assertEquals(expected, request.headers().get(HttpHeaderNames.HOST));
+        } finally {
+            request.release();
+        }
+    }
+
+    @Test
     public void testRawPath() {
         URI uri = URI.create("ws://localhost:9999/path%20with%20ws");
         WebSocketClientHandshaker handshaker = newHandshaker(uri);
         FullHttpRequest request = handshaker.newHandshakeRequest();
         try {
             assertEquals("/path%20with%20ws", request.getUri());
+        } finally {
+            request.release();
+        }
+    }
+
+    @Test
+    public void testRawPathWithQuery() {
+        URI uri = URI.create("ws://localhost:9999/path%20with%20ws?a=b%20c");
+        WebSocketClientHandshaker handshaker = newHandshaker(uri);
+        FullHttpRequest request = handshaker.newHandshakeRequest();
+        try {
+            assertEquals("/path%20with%20ws?a=b%20c", request.uri());
         } finally {
             request.release();
         }
@@ -90,7 +134,7 @@ public abstract class WebSocketClientHandshakerTest {
         };
 
         byte[] data = new byte[24];
-        ThreadLocalRandom.current().nextBytes(data);
+        PlatformDependent.threadLocalRandom().nextBytes(data);
 
         // Create a EmbeddedChannel which we will use to encode a BinaryWebsocketFrame to bytes and so use these
         // to test the actual handshaker.
